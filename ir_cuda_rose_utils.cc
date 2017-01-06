@@ -4,7 +4,7 @@
  All Rights Reserved.
 
  Purpose:
-   SUIF interface utilities.
+   ROASE interface utilities.   TODO remove all Sg references 
 
  Notes:
 
@@ -12,7 +12,8 @@
    01/2006 created by Chun Chen
 *****************************************************************************/
 
-//#include <suif1.h>
+
+#ifdef FRONTEND_ROSE 
 #include "ir_rose_utils.hh"
 
 
@@ -189,3 +190,5 @@ void swap_node_for_node_list(SgNode* tn, SgNode* new_tnl) {
   }
   //    return isSgNode(p);
 }
+
+#endif

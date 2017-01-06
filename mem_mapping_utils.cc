@@ -1,7 +1,10 @@
 #include <vector>
 #include <string.h>
 #include <map>
+
+#ifdef FRONTEND_ROSE 
 #include "rose.h"
+
 #include "mem_mapping_utils.hh"
 
 using namespace SageBuilder;
@@ -74,3 +77,4 @@ texture_memory_mapping::texture_memory_mapping() : memory_mapping() { }
 constant_memory_mapping::constant_memory_mapping() : memory_mapping() { }
 
 
+#endif  // FRONTEND_ROSE 

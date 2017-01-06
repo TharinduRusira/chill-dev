@@ -1,28 +1,62 @@
-#ifndef LOOP_CUDA_HH
-#define LOOP_CUDA_HH
+#ifndef LOOP_CUDA_ROSE_HH
+#define LOOP_CUDA_ROSE_HH
 
 #include "loop.hh"
 #include "mem_mapping_utils.hh"
 #include <string.h>
-#include "rose.h"
-//#include <suif1.h>
+#include "chill_ast.hh" 
+#include "chill_io.hh"
+
+#include <code_gen/CG_chillRepr.h>
 
 using namespace omega;
 using namespace SageBuilder;
+#ifndef ENUMMEMORYMODE 
+#define ENUMMEMORYMODE 
 enum MemoryMode { GlobalMem, SharedMem, TexMem };
+#endif 
 
+#ifndef CUDAVARDEFS
+#define CUDAVARDEFS
 struct VarDefs {
   std::string name;
   std::string secondName;
-  SgExpression* size_expr; //array size as an expression (can be a product of other variables etc)
-  SgType* type;
-  SgVariableSymbol* in_data; //Variable of array to copy data in from (before kernel call)
-  SgVariableSymbol* out_data; //Variable of array to copy data out to (after kernel call)
+  char *type;
+
+  chillAST_node *size_expr; //array size as an expression (can be a product of other variables etc)
+  //omega::chillRepr *size_expr; // ?? 
+
+  chillAST_VarDecl *vardecl; 
+  chillAST_node *in_data;   //Variable of array to copy data in from (before kernel call)
+  chillAST_node *out_data;  //Variable of array to copy data out to (after kernel call)
+  chillAST_VarDecl *CPUside_param;  // name of CPU side parameter (see: in_data, out_data, when not NULL)
+
   std::vector<int> size_multi_dim; //-1 if linearized, the constant size N, of a NxN 2D array otherwise
   bool tex_mapped; //protonu-- true if this variable will be texture mapped, so no need to pass it as a argument
   bool cons_mapped;
   std::string original_name; //this is such a hack, to store the original name, to store a table to textures used
+
+  void   print() { 
+    debug_fprintf(stderr, "Vardefs:\n");  //  0x%x\n", this); 
+    debug_fprintf(stderr, "name %s\n", name.c_str()); 
+    debug_fprintf(stderr, "second name %s\n", secondName.c_str()); 
+    debug_fprintf(stderr, "original name %s\n", original_name.c_str()); 
+    debug_fprintf(stderr, "type ");
+    if (!type) debug_fprintf(stderr, "NULL)\n");
+    else debug_fprintf(stderr, "%s\n", type); 
+    debug_fprintf(stderr, "size ");
+    size_expr->print(0, stderr);
+
+    //for (int i=0; i<size_multi_dim.size(); i++) { 
+    //  if (i) debug_fprintf(stderr, "x");
+    //  debug_fprintf(stderr, "%d", size_multi_dim[i]);
+    //} 
+    debug_fprintf(stderr, "\n");
+    if (tex_mapped)  debug_fprintf(stderr, "tex  mapped\n");
+    if (cons_mapped) debug_fprintf(stderr, "cons mapped\n");
+  };
 };
+#endif
 
 
 class LoopCuda: public Loop{
@@ -34,13 +68,6 @@ public:
   bool useIdxNames;
   std::vector<std::string> index;
   
-  SgSymbolTable* symtab;
-  SgSymbolTable* parameter_symtab;
-  SgSymbolTable* body_symtab;
-  SgGlobal* globals;
-  SgGlobal* globalScope;  
-  SgScopeStatement* func_body;     
-  SgFunctionDefinition* func_definition;   
   //protonu--inserting this here, Gabe's implementation had it 
   //the struct statment as nonSplitLevels
   std::vector<std::vector<int> > stmt_nonSplitLevels;
@@ -69,7 +96,7 @@ public:
   //Anand: Adding CG_outputRepr* representations of cu_bx, cu_by, cu_tx, cu_ty
   //and cu_tz for non constant loop bounds
   
-  CG_outputRepr *cu_bx_repr, *cu_by_repr, *cu_tx_repr, *cu_ty_repr, *cu_tz_repr;
+  CG_chillRepr *cu_bx_repr, *cu_by_repr, *cu_tx_repr, *cu_ty_repr, *cu_tz_repr;
   
   //tile statements, and loop-levels (cudaize v1)
   std::vector< std::vector<int> > cu_thread_loop;
@@ -87,7 +114,8 @@ public:
   void printCode(int effort=1, bool actuallyPrint=true) const; 
   void printRuntimeInfo() const;
   void printIndexes() const;
-  SgNode* getCode(int effort = 1) const;
+  chillAST_node* getCode(int effort = 1) const;    
+
   void printIS();
   
   
@@ -117,8 +145,11 @@ public:
   //stmnt_num is referenced from the perspective of being inside the cudize block loops
   bool cudaize_v2(std::string kernel_name, std::map<std::string, int> array_dims,
                   std::vector<std::string> blockIdxs, std::vector<std::string> threadIdxs);
-  SgNode* cudaize_codegen_v2();
-  SgNode* codegen();
+
+  chillAST_FunctionDecl *function_that_contains_this_loop; 
+  chillAST_node* cudaize_codegen_v2(); 
+  chillAST_node* codegen();            
+
   
   //protonu--have to add the constructors for the new class
   //and maybe destructors (?)

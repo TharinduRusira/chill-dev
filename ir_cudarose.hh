@@ -1,11 +1,15 @@
-#ifndef IR_CUDA_ROSE
-#define IR_CUDA_ROSE
+#ifndef IR_CUDAROSE_HH
+#define IR_CUDAROSE_HH
 
+#include "chill_io.hh"
 #include <code_gen/CG_roseRepr.h>
 #include <code_gen/CG_roseBuilder.h>
 #include "ir_rose.hh"
 #include "loop.hh"
-#include "loop_cuda_rose.hh"
+
+// these are DAMNED close now 
+#include "loop_cuda_chill.hh"
+
 #include "ir_rose_utils.hh"
 
 
@@ -17,19 +21,21 @@ public:
   
   IR_cudaroseCode(const char *filename, const char* proc_name);
   
-  
-  
+  std::string cudaFileToWrite;
+
+  // TODO delete 
   SgGlobal *gsym_;
   SgScopeStatement* defn;      
   SgGlobal* first_scope;
   SgSymbolTable* parameter;
   SgSymbolTable* body;
-  SgFunctionDefinition* func_defn;    
   std::vector<SgSymbolTable*> write_procs;//procs to write  
+  
+
   
   
   IR_ArraySymbol *CreateArraySymbol(const IR_Symbol *sym, std::vector<omega::CG_outputRepr *> &size,int sharedAnnotation = 1);
-  omega::CG_outputRepr* init_code(){ return init_code_; }
+
   bool commit_loop(Loop *loop, int loop_num);
   std::vector<SgForStatement *> get_loops()
   { 

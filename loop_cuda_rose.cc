@@ -1,3 +1,4 @@
+
 /*****************************************************************************
  Copyright (C) 2009 University of Utah
  All Rights Reserved.
@@ -11,12 +12,20 @@
  1/7/10 Created by Gabe Rudy by migrating code from loop.cc
  31/1/11 Modified by Protonu Basu
 *****************************************************************************/
-#define TRANSFORMATION_FILE_INFO Sg_File_Info::generateDefaultFileInfoForTransformationNode()
+
+#ifdef FRONTEND_ROSE
+
+#include <malloc.h>
+
+//#define TRANSFORMATION_FILE_INFO Sg_File_Info::generateDefaultFileInfoForTransformationNode()
+
+// these are very similar (the same?) 
+#include "loop_cuda_chill.hh"
+
+
 #include <code_gen/CG_stringBuilder.h>
 #include <codegen.h>
 #include <code_gen/CG_utils.h>
-#include <code_gen/CG_outputRepr.h>
-#include "loop_cuda_rose.hh"
 #include "loop.hh"
 #include <math.h>
 //#include <useful.h>
@@ -31,20 +40,15 @@
 using namespace omega;
 using namespace SageBuilder;
 using namespace SageInterface;
-//using namespace Outliner;
-//using namespace ASTtools;
-char *k_cuda_texture_memory; //protonu--added to track texture memory type
-//extern char *omega::k_cuda_texture_memory; //protonu--added to track texture memory type
-extern char *omega::k_ocg_comment;
 
-static int cudaDebug;
-class CudaStaticInit {
-public:
-  CudaStaticInit() {
-    cudaDebug = 0; //Change this to 1 for debug
-  }
-};
-static CudaStaticInit junkInitInstance__;
+
+namespace omega {
+    extern char* k_cuda_texture_memory; //protonu--added to track texture memory type
+}
+extern char *k_ocg_comment;
+
+extern bool cudaDebug;
+
 
 std::string& upcase(std::string& s) {
   for (int i = 0; i < s.size(); i++)
@@ -60,6 +64,7 @@ void printVs(const std::vector<std::string>& curOrder) {
     printf("%s", curOrder[i].c_str());
   }
   printf("\n");
+  fflush(stdout); 
 }
 
 void printVS(const std::vector<std::string>& curOrder) {
@@ -70,6 +75,7 @@ void printVS(const std::vector<std::string>& curOrder) {
     printf("%s", curOrder[i].c_str());
   }
   printf("\n");
+  fflush(stdout); 
 }
 
 LoopCuda::~LoopCuda() {
@@ -79,8 +85,10 @@ LoopCuda::~LoopCuda() {
 }
 
 bool LoopCuda::symbolExists(std::string s) {
-  
-  if (body_symtab->find_variable(SgName(s.c_str()))
+  debug_fprintf(stderr, "LoopCuda::symbolExists( %s )  TODO loop_cuda_rose.cc L89\nDIE\n", s.c_str()); 
+  exit(-1);   // DFL 
+  /*  
+  if (body_symtab->find_variable(SgName(s.c_str()))  commented OUT
       || parameter_symtab->find_variable(SgName(s.c_str())))
     return true;
   if (globals->lookup_variable_symbol(SgName(s.c_str())))
@@ -89,10 +97,12 @@ bool LoopCuda::symbolExists(std::string s) {
     for (int j = 0; j < idxNames[i].size(); j++)
       if (strcmp(idxNames[i][j].c_str(), s.c_str()) == 0)
         return true;
+  */
   return false;
 }
 
 void LoopCuda::addSync(int stmt_num, std::string idxName) {
+  debug_fprintf(stderr, "addsync\n"); 
   //we store these and code-gen inserts sync to omega comments where stmt
   //in loop that has idxName being generated
   syncs.push_back(make_pair(stmt_num, idxName));
@@ -109,6 +119,14 @@ enum Type {
   Int
 };
 
+int wrapInIfFromMinBound(chillAST_node* then_part, 
+                         chillAST_ForStmt* loop,
+                         chillAST_node *symtab,    
+                         chillAST_node* bound_sym) {
+  debug_fprintf(stderr, "wrapInIfFromMinBound()\n"); exit(-1); // DFL 
+
+  return 0; 
+  /*
 SgNode* wrapInIfFromMinBound(SgNode* then_part, SgForStatement* loop,
                              SgScopeStatement* symtab, SgVariableSymbol* bound_sym) {
   // CG_roseBuilder *ocg = new CG_roseBuilder(
@@ -125,9 +143,9 @@ SgNode* wrapInIfFromMinBound(SgNode* then_part, SgForStatement* loop,
         == "__rose_lt") {
       SgExprListExp* arg_list = call->get_args();
       SgExpression *if_bound = *(arg_list->get_expressions().begin());
-      /*This relies on the minimum expression being the rhs operand of
-       * the min instruction.
-       */
+      //This relies on the minimum expression being the rhs operand of
+      // the min instruction.
+      //
       SgIfStmt *ifstmt = buildIfStmt(
         buildLessOrEqualOp(buildVarRefExp(bound_sym), if_bound),
         isSgStatement(then_part), NULL);
@@ -152,7 +170,7 @@ SgNode* wrapInIfFromMinBound(SgNode* then_part, SgForStatement* loop,
     
     }
 */
-  return then_part;
+  //return then_part;
 }
 
 /**
@@ -182,74 +200,19 @@ SgNode* wrapInIfFromMinBound(SgNode* then_part, SgForStatement* loop,
  *     cur_body
  *     if(i==n-1) stmt1
  */
+void findReplacePreferedIdxs(chillAST_node *newkernelcode,
+                             chillAST_FunctionDecl *kernel ) { 
+  debug_fprintf(stderr, "\nrecursiveFindReplacePreferedIdxs( sync 0 )    perhaps adding syncthreads\n"); 
 
-std::vector<SgForStatement*> findCommentedFors(const char* index, SgNode* tnl) {
-  std::vector<SgForStatement *> result;
-  bool next_loop_ok = false;
+  std::vector<chillAST_VarDecl *>* symtab = kernel->getSymbolTable();
+
+  newkernelcode->findLoopIndexesToReplace( symtab, false ); 
+
   
-  if (isSgBasicBlock(tnl)) {
-    
-    SgStatementPtrList& list = isSgBasicBlock(tnl)->get_statements();
-    
-    for (SgStatementPtrList::iterator it = list.begin(); it != list.end();
-         it++) {
-      std::vector<SgForStatement*> t = findCommentedFors(index,
-                                                         isSgNode(*it));
-      std::copy(t.begin(), t.end(), back_inserter(result));
-    }
-  } else if (isSgForStatement(tnl)) {
-    
-    AstTextAttribute* att =
-      (AstTextAttribute*) (isSgNode(tnl)->getAttribute(
-                             "omega_comment"));
-    std::string comment = att->toString();
-    
-    if (comment.find("~cuda~") != std::string::npos
-        && comment.find("preferredIdx: ") != std::string::npos) {
-      std::string idx = comment.substr(
-        comment.find("preferredIdx: ") + 14, std::string::npos);
-      if (idx.find(" ") != std::string::npos)
-        idx = idx.substr(0, idx.find(" "));
-      if (strcmp(idx.c_str(), index) == 0)
-        next_loop_ok = true;
-    }
-    
-    if (next_loop_ok) {
-      //printf("found loop %s\n", static_cast<tree_for *>(tn)->index()->name());
-      result.push_back(isSgForStatement(tnl));
-    } else {
-      //printf("looking down for loop %s\n", static_cast<tree_for *>(tn)->index()->name());
-      std::vector<SgForStatement*> t = findCommentedFors(index,
-                                                         isSgForStatement(tnl)->get_loop_body());
-      std::copy(t.begin(), t.end(), back_inserter(result));
-    }
-    next_loop_ok = false;
-  } else if (isSgIfStmt(tnl)) {
-    //printf("looking down if\n");
-    SgIfStmt *tni = isSgIfStmt(tnl);
-    std::vector<SgForStatement*> t = findCommentedFors(index,
-                                                       tni->get_true_body());
-    std::copy(t.begin(), t.end(), back_inserter(result));
-  }
-  
-  return result;
 }
 
-SgNode* forReduce(SgForStatement* loop, SgVariableSymbol* reduceIndex,
-                  SgScopeStatement* body_syms) {
-  //We did the replacements all at once with recursiveFindPreferedIdxs
-  //replacements r;
-  //r.oldsyms.append(loop->index());
-  //r.newsyms.append(reduceIndex);
-  //tree_for* new_loop = (tree_for*)loop->clone_helper(&r, true);
-  SgForStatement* new_loop = loop;
-  
-  //return body one loops in
-  SgNode* tnl = loop_body_at_level(new_loop, 1);
-  //wrap in conditional if necessary
-  tnl = wrapInIfFromMinBound(tnl, new_loop, body_syms, reduceIndex);
-  return tnl;
-}
+
+
 
 void recursiveFindRefs(SgNode* code, std::set<const SgVariableSymbol *>& syms,
                        SgFunctionDefinition* def) {
@@ -285,102 +248,6 @@ void recursiveFindRefs(SgNode* code, std::set<const SgVariableSymbol *>& syms,
   set_intersection(diff_U_L.begin(), diff_U_L.end(), Q.begin(), Q.end(),
                    inserter(syms, syms.begin()));
   
-  /* std::vector<SgVariableSymbol *> scalars;
-  //SgNode  *tnl = static_cast<const omega::CG_roseRepr *>(repr)->GetCode();
-  SgStatement* stmt;
-  SgExpression* exp;
-  if (tnl != NULL) {
-  if(stmt = isSgStatement(tnl)){
-  if(isSgBasicBlock(stmt)){
-  SgStatementPtrList& stmts = isSgBasicBlock(stmt)->get_statements();
-  for(int i =0; i < stmts.size(); i++){
-  //omega::CG_roseRepr *r = new omega::CG_roseRepr(isSgNode(stmts[i]));
-  std::vector<SgVariableSymbol *> a = recursiveFindRefs(isSgNode(stmts[i]));
-  //delete r;
-  std::copy(a.begin(), a.end(), back_inserter(scalars));
-  }
-  
-  }
-  else if(isSgForStatement(stmt)){
-  
-  SgForStatement *tnf =  isSgForStatement(stmt);
-  //omega::CG_roseRepr *r = new omega::CG_roseRepr(isSgStatement(tnf->get_loop_body()));
-  std::vector<SgVariableSymbol *> a = recursiveFindRefs(isSgNode(tnf->get_loop_body()));
-  //delete r;
-  std::copy(a.begin(), a.end(), back_inserter(scalars));
-  }
-  else if(isSgFortranDo(stmt)){
-  SgFortranDo *tfortran =  isSgFortranDo(stmt);
-  omega::CG_roseRepr *r = new omega::CG_roseRepr(isSgStatement(tfortran->get_body()));
-  std::vector<SgVariableSymbol *> a = recursiveFindRefs(r);
-  delete r;
-  std::copy(a.begin(), a.end(), back_inserter(scalars));
-  }
-  
-  else if(isSgIfStmt(stmt) ){
-  SgIfStmt* tni = isSgIfStmt(stmt);
-  //omega::CG_roseRepr *r = new omega::CG_roseRepr(isSgNode(tni->get_conditional()));
-  std::vector<SgVariableSymbol *> a = recursiveFindRefs(isSgNode(tni->get_conditional()));
-  //delete r;
-  std::copy(a.begin(), a.end(), back_inserter(scalars));
-  //r = new omega::CG_roseRepr(isSgNode(tni->get_true_body()));
-  a = recursiveFindRefs(isSgNode(tni->get_true_body()));
-  //delete r;
-  std::copy(a.begin(), a.end(), back_inserter(scalars));
-  //r = new omega::CG_roseRepr(isSgNode(tni->get_false_body()));
-  a = recursiveFindRefs(isSgNode(tni->get_false_body()));
-  //delete r;
-  std::copy(a.begin(), a.end(), back_inserter(scalars));
-  }
-  else if(isSgExprStatement(stmt)) {
-  //omega::CG_roseRepr *r = new omega::CG_roseRepr(isSgExpression(isSgExprStatement(stmt)->get_expression()));
-  std::vector<SgVariableSymbol *> a = recursiveFindRefs(isSgNode(isSgExprStatement(stmt)->get_expression()));
-  //delete r;
-  std::copy(a.begin(), a.end(), back_inserter(scalars));
-  
-  }
-  }
-  }
-  else{
-  SgExpression* op = isSgExpression(tnl);
-  if(isSgVarRefExp(op)){
-  
-  scalars.push_back(isSgVarRefExp(op)->get_symbol());
-  
-  }
-  else if( isSgAssignOp(op)){
-  //omega::CG_roseRepr *r1 = new omega::CG_roseRepr(isSgAssignOp(op)->get_lhs_operand());
-  std::vector<SgVariableSymbol *> a1 = recursiveFindRefs(isSgNode(isSgAssignOp(op)->get_lhs_operand()));
-  //delete r1;
-  std::copy(a1.begin(), a1.end(), back_inserter(scalars));
-  //omega::CG_roseRepr *r2 = new omega::CG_roseRepr(isSgAssignOp(op)->get_rhs_operand());
-  std::vector<SgVariableSymbol *> a2 = recursiveFindRefs(isSgNode(isSgAssignOp(op)->get_rhs_operand()));
-  //delete r2;
-  std::copy(a2.begin(), a2.end(), back_inserter(scalars));
-  
-  }
-  else if(isSgBinaryOp(op)){
-  // omega::CG_roseRepr *r1 = new omega::CG_roseRepr(isSgBinaryOp(op)->get_lhs_operand());
-  std::vector<SgVariableSymbol *> a1 = recursiveFindRefs(isSgNode(isSgBinaryOp(op)->get_lhs_operand()));
-  //delete r1;
-  std::copy(a1.begin(), a1.end(), back_inserter(scalars));
-  //omega::CG_roseRepr *r2 = new omega::CG_roseRepr(isSgBinaryOp(op)->get_rhs_operand());
-  std::vector<SgVariableSymbol *> a2 = recursiveFindRefs((isSgBinaryOp(op)->get_rhs_operand()));
-  //delete r2;
-  std::copy(a2.begin(), a2.end(), back_inserter(scalars));
-  }
-  else if(isSgUnaryOp(op)){
-  //omega::CG_roseRepr *r1 = new omega::CG_roseRepr(isSgUnaryOp(op)->get_operand());
-  std::vector<SgVariableSymbol *> a1 = recursiveFindRefs(isSgNode(isSgUnaryOp(op)->get_operand()));
-  //delete r1;
-  std::copy(a1.begin(), a1.end(), back_inserter(scalars));
-  }
-  
-  }
-  return scalars;
-  
-  
-  */
   
 }
 
@@ -438,8 +305,7 @@ SgNode* recursiveFindReplacePreferedIdxs(SgNode* code, SgSymbolTable* body_syms,
           //printf("idx created and inserted\n");
         }
         //Now insert into our map for future
-	if (cudaDebug)
-	    std::cout << idx << "\n\n";
+        if (cudaDebug) std::cout << idx << "\n\n";
         loop_idxs.insert(make_pair(idx, idxSym));
       }
       //See if we have a sync as well
@@ -660,8 +526,7 @@ SgNode* recursiveFindReplacePreferedIdxs(SgNode* code, SgSymbolTable* body_syms,
               idxSym = vs;
             }
             //Now insert into our map for future
-	    if (cudaDebug)
-		std::cout << idx << "\n\n";
+            if (cudaDebug) std::cout << idx << "\n\n";
             loop_idxs.insert(make_pair(idx, idxSym));
             
           }
@@ -822,6 +687,7 @@ SgNode* recursiveFindReplacePreferedIdxs(SgNode* code, SgSymbolTable* body_syms,
           static_cast<const omega::CG_roseRepr *>(block)->GetCode();
         
         isSgIfStmt(tnli1)->set_true_body(body_);
+        body_->set_parent(tnli1);
         
         if ((isSgIfStmt(*it)->get_false_body()))
           isSgIfStmt(tnli1)->set_false_body(
@@ -850,102 +716,37 @@ SgNode* recursiveFindReplacePreferedIdxs(SgNode* code, SgSymbolTable* body_syms,
     
   }
   
-  /*    if (!isSgBasicBlock(
-        recursiveFindReplacePreferedIdxs(isSgNode(*it), body_syms,
-        param_syms, body, loop_idxs, globalscope))) {
-        SgStatement *to_push = isSgStatement(
-        recursiveFindReplacePreferedIdxs(isSgNode(*it),
-        body_syms, param_syms, body, loop_idxs,
-        globalscope, sync));
-        clone->append_statement(to_push);
-        
-        if ((sync_found) && isSgForStatement(to_push)) {
-        SgName name_syncthreads("__syncthreads");
-        SgFunctionSymbol * syncthreads_symbol =
-        globalscope->lookup_function_symbol(
-        name_syncthreads);
-        
-        // Create a call to __syncthreads():
-        SgFunctionCallExp * syncthreads_call = buildFunctionCallExp(
-        syncthreads_symbol, buildExprListExp());
-        
-        SgExprStatement* stmt = buildExprStatement(
-        syncthreads_call);
-        
-        clone->append_statement(isSgStatement(stmt));
-        }
-        //  std::cout<<isSgNode(*it)->unparseToString()<<"\n\n";
-        } else {
-        
-        SgStatementPtrList& tnl2 = isSgBasicBlock(
-        recursiveFindReplacePreferedIdxs(isSgNode(*it),
-        body_syms, param_syms, body, loop_idxs,
-        globalscope))->get_statements();
-        for (SgStatementPtrList::const_iterator it2 = tnl2.begin();
-        it2 != tnl2.end(); it2++) {
-        clone->append_statement(*it2);
-        
-        sync_found = true;
-        //  std::cout<<isSgNode(*it2)->unparseToString()<<"\n\n";
-        }
-        }
-        
-        }
-        return isSgNode(clone);
-        }
-  */
-//  return tnl;
 }
 
 // loop_vars -> array references
 // loop_idxs -> <idx_name,idx_sym> map for when we encounter a loop with a different preferredIndex
-// dim_vars -> out param, fills with <old,new> var_sym pair for 2D array dimentions (messy stuff)
-SgNode* swapVarReferences(SgNode* code,
-                          std::set<const SgVariableSymbol *>& syms, SgSymbolTable* param,
-                          SgSymbolTable* body, SgScopeStatement* body_stmt) {
-  //Iterate over every expression, looking up each variable and type
-  //reference used and possibly replacing it or adding it to our symbol
-  //table
-  //
-  //We use the built-in cloning helper methods to seriously help us with this!
+// dim_vars -> out param, fills with <old,new> var_sym pair for 2D array dimensions (messy stuff)
+void swapVarReferences( chillAST_node *newkernelcode,
+                        chillAST_FunctionDecl *kernel ) { 
+
+  // find what variables are referenced in the new kernel code
+  vector<chillAST_VarDecl*> newdecls;
+  newkernelcode->gatherVarDecls( newdecls );
   
-  //Need to do a recursive mark
-  
-  std::set<const SgVariableSymbol *>::iterator myIterator;
-  for (myIterator = syms.begin(); myIterator != syms.end(); myIterator++) {
-    SgName var_name = (*myIterator)->get_name();
-    std::string x = var_name.getString();
+  debug_fprintf(stderr, "%d variables in kernel\n", newdecls.size()); 
+  for (int i=0; i<newdecls.size(); i++) { 
+    debug_fprintf(stderr, "variable name %s  ", newdecls[i]->varname); 
     
-    if ((param->find_variable(var_name) == NULL)
-        && (body->find_variable(var_name) == NULL)) {
-      SgInitializedName* decl = (*myIterator)->get_declaration();
-      
-      SgVariableSymbol* dvs = new SgVariableSymbol(decl);
-      SgVariableDeclaration* var_decl = buildVariableDeclaration(
-        dvs->get_name(), dvs->get_type());
-      
-      AstTextAttribute* att = (AstTextAttribute*) (isSgNode(
-                                                     decl->get_declaration())->getAttribute("__shared__"));
-      if (isSgNode(decl->get_declaration())->attributeExists(
-            "__shared__"))
-        var_decl->get_declarationModifier().get_storageModifier().setCudaShared();
-      
-      appendStatement(var_decl, body_stmt);
-      
-      dvs->set_parent(body);
-      body->insert(var_name, dvs);
+    chillAST_VarDecl *isParam    = kernel->hasParameterNamed( newdecls[i]->varname ); 
+    chillAST_VarDecl *isLocalVar = kernel->hasVariableNamed(  newdecls[i]->varname ); 
+
+    if (isParam)    { debug_fprintf(stderr, "is a parameter\n"); }
+    if (isLocalVar) { debug_fprintf(stderr, "is already defined in the kernel\n"); }
+
+    if (!isParam && (!isLocalVar)) { 
+      debug_fprintf(stderr, "needed to be added to kernel symbol table\n");
+      kernel->addDecl(  newdecls[i] ); 
+      kernel->addChild( newdecls[i] );  // adds to body! 
     }
-    
-    std::vector<SgVarRefExp *> array = substitute(code, *myIterator, NULL,
-                                                  isSgNode(body));
-    
-    SgVariableSymbol* var = (SgVariableSymbol*) (*myIterator);
-    for (int j = 0; j < array.size(); j++)
-      array[j]->set_symbol(var);
   }
-  
-  return code;
 }
+
+
 
 bool LoopCuda::validIndexes(int stmt, const std::vector<std::string>& idxs) {
   for (int i = 0; i < idxs.size(); i++) {
@@ -966,7 +767,17 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
                           std::map<std::string, int> array_dims,
                           std::vector<std::string> blockIdxs,
                           std::vector<std::string> threadIdxs) {
+  debug_fprintf(stderr, " LoopCuda::cudaize_v2() ROSE\n");
+  exit(-1); 
+  for(std::map<std::string, int>::iterator it = array_dims->begin(); it != array_dims->end(); it++)  {
+    debug_fprintf(stderr, "array_dims  '%s'  %d\n", it->first.c_str(), it->second)
+  }
+
+  this->array_dims = array_dims;
+
+  debug_fprintf(stderr, "\nBEFORE ir->builder()\n"); 
   CG_outputBuilder *ocg = ir->builder();
+  debug_fprintf(stderr, "AFTER  ir->builder()\n"); 
   int stmt_num = 0;
   if (cudaDebug) {
     printf("cudaize_v2(%s, {", kernel_name.c_str());
@@ -976,6 +787,7 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
     printf("}, thread={");
     printVs(threadIdxs);
     printf("})\n");
+    fflush(stdout); 
   }
   
   this->array_dims = array_dims;
@@ -989,32 +801,46 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
       "found in the current set of indexes.");
   }
   if (blockIdxs.size() == 0)
-    throw std::runtime_error("Cudaize: Need at least one block dimention");
+    throw std::runtime_error("Cudaize: Need at least one block dimension");
   int block_level = 0;
   //Now, we will determine the actual size (if possible, otherwise
-  //complain) for the block dimentions and thread dimentions based on our
+  //complain) for the block dimensions and thread dimensions based on our
   //indexes and the relations for our stmt;
   for (int i = 0; i < blockIdxs.size(); i++) {
     int level = findCurLevel(stmt_num, blockIdxs[i]);
     int ub, lb;
     CG_outputRepr* ubrepr = extractCudaUB(stmt_num, level, ub, lb);
+    fflush(stdout); 
+    debug_fprintf(stderr, "lb %ldL\n", lb); 
+
     if (lb != 0) {
+      debug_fprintf(stderr, "lb != 0?\n");
       //attempt to "normalize" the loop with an in-place tile and then re-check our bounds
-      if (cudaDebug)
+      if (cudaDebug) {
         printf(
-          "Cudaize: doing tile at level %d to try and normalize lower bounds\n",
+          "Cudaize1: doing tile at level %d to try and normalize lower bounds\n",
           level);
+        fflush(stdout); 
+      }
+      debug_fprintf(stderr, "calling tile()\n"); 
       tile(stmt_num, level, 1, level, CountedTile);
       idxNames[stmt_num].insert(idxNames[stmt_num].begin() + (level), ""); //TODO: possibly handle this for all sibling stmts
       ubrepr = extractCudaUB(stmt_num, level, ub, lb);
     }
+    else debug_fprintf(stderr, "lb == 0?\n");
+
+    fflush(stdout); 
+    debug_fprintf(stderr, "lb2 %ldL\n", lb); 
     if (lb != 0) {
+      debug_fprintf(stderr, "lb2 != 0?\n");
       char buf[1024];
       sprintf(buf,
-              "Cudaize: Loop at level %d does not have 0 as it's lower bound",
+              "Cudaize: Loop at level %d does not have 0 as its lower bound",
               level);
       throw std::runtime_error(buf);
     }
+    else debug_fprintf(stderr, "lb2 == 0?\n");
+
     if (ub < 0) {
       char buf[1024];
       sprintf(buf,
@@ -1023,9 +849,13 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
       //Anand: Commenting out error indication for lack of constant upper bound
       //throw std::runtime_error(buf);
     }
-    if (cudaDebug)
+    if (cudaDebug) {
       printf("block idx %s level %d lb: %d ub %d\n", blockIdxs[i].c_str(),
              level, lb, ub);
+      fflush(stdout); 
+    }
+    else  debug_fprintf(stderr, "NO CUDADEBUG\n");
+
     if (i == 0) {
       block_level = level;
       if (ubrepr == NULL) {
@@ -1033,16 +863,16 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
         cu_bx_repr = NULL;
       } else {
         cu_bx = 0;
-        cu_bx_repr = ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
+        cu_bx_repr = (omega::CG_chillRepr*)ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
       }
       idxNames[stmt_num][level - 1] = "bx";
     } else if (i == 1) {
       if (ubrepr == NULL) {
-        cu_by = ub + 1;
+        cu_by = ub + 1; debug_fprintf(stderr, "cu_by = %d\n", cu_by); 
         cu_by_repr = NULL;
       } else {
-        cu_by = 0;
-        cu_by_repr = ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
+        cu_by = 0;          debug_fprintf(stderr, "cu_by = %d\n", cu_by); 
+        cu_by_repr = (omega::CG_chillRepr*)ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
       }
       idxNames[stmt_num][level - 1] = "by";
     }
@@ -1055,16 +885,23 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
     int level = findCurLevel(stmt_num, threadIdxs[i]);
     int ub, lb;
     CG_outputRepr* ubrepr = extractCudaUB(stmt_num, level, ub, lb);
+    fflush(stdout); 
+    debug_fprintf(stderr, "lb3 %ldL\n", lb); 
     if (lb != 0) {
+      debug_fprintf(stderr, "lb3 != 0?\n");
       //attempt to "normalize" the loop with an in-place tile and then re-check our bounds
-      if (cudaDebug)
+      if (cudaDebug) {
         printf(
-          "Cudaize: doing tile at level %d to try and normalize lower bounds\n",
+          "Cudaize2: doing tile at level %d to try and normalize lower bounds\n",
           level);
+        fflush(stdout); 
+      }
       tile(stmt_num, level, 1, level, CountedTile);
       idxNames[stmt_num].insert(idxNames[stmt_num].begin() + (level), "");
       ubrepr = extractCudaUB(stmt_num, level, ub, lb);
     }
+    else debug_fprintf(stderr, "lb3 == 0?\n");
+
     if (lb != 0) {
       char buf[1024];
       sprintf(buf,
@@ -1091,7 +928,7 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
         cu_tx_repr = NULL;
       } else {
         cu_tx = 0;
-        cu_tx_repr = ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
+        cu_tx_repr = (omega::CG_chillRepr*)ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
       }
       idxNames[stmt_num][level - 1] = "tx";
     } else if (i == 1) {
@@ -1101,7 +938,7 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
         cu_ty_repr = NULL;
       } else {
         cu_ty = 0;
-        cu_ty_repr = ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
+        cu_ty_repr = (omega::CG_chillRepr*)ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
       }
       idxNames[stmt_num][level - 1] = "ty";
     } else if (i == 2) {
@@ -1110,7 +947,7 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
         cu_tz_repr = NULL;
       } else {
         cu_tz = 0;
-        cu_tz_repr = ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
+        cu_tz_repr = (omega::CG_chillRepr*)ocg->CreatePlus(ubrepr, ocg->CreateInt(1));
       }
       idxNames[stmt_num][level - 1] = "tz";
     }
@@ -1138,22 +975,30 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
   }
   
   if (cudaDebug) {
-    printf("Codegen: current names: ");
+    printf("cudaize_vman svn 2: current names: ");
     printVS(idxNames[stmt_num]);
   }
   //Set codegen flag
   code_gen_flags |= GenCudaizeV2;
   
-  //Save array dimention sizes
+  //Save array dimension sizes
   this->array_dims = array_dims;
   cu_kernel_name = kernel_name.c_str();
   
 }
 
+chillAST_VarDecl *addBuiltin( char *nameofbuiltin, char *typeOfBuiltin, chillAST_node *somecode) { 
+  // create a builtin, like "blockIdx.x", so we can use it in assignment statements
+  chillAST_VarDecl *bi = new chillAST_VarDecl( typeOfBuiltin, nameofbuiltin, "", NULL); // somecode ); // ->getSourceFile() );
+  bi->isABuiltin = true;
+  return bi;
+}
+
+
 /*
- * setupConstantVar
- * handles constant variable declaration
- * and adds a global constant variable
+ * setupConstantVar  comment 
+ * handles CUDA constant variable declaration
+ * and adds a global CUDA constant variable
  * parameters:
  *   constant - the constant_memory_mapping object for this loop
  *   arr_def  - the VarDefs object for the mapped variable
@@ -1161,7 +1006,8 @@ bool LoopCuda::cudaize_v2(std::string kernel_name,
  *   i        - an index to keep new variable names unique
  *   symtab   - global symbol table
  */
-static void setupConstantVar(constant_memory_mapping* constant, VarDefs* arr_def, SgGlobal* globals, int i, SgSymbolTable* symtab) {
+static void setupConstantVar(constant_memory_mapping* constant, VarDefs* arr_def, SgGlobal* globals, int i, SgSymbolTable* symtab) { // definition 
+  /* 
   char* buf1 = new char[32];
   snprintf(buf1, 32, "cs%dRef", i+1);
   arr_def->secondName = buf1;
@@ -1170,20 +1016,22 @@ static void setupConstantVar(constant_memory_mapping* constant, VarDefs* arr_def
   snprintf(buf2, 64, "__device__ __constant__ float");
   
   SgVariableDeclaration* consvar_decl = buildVariableDeclaration(
-                     SgName(std::string(buf1)), buildArrayType(
-                                 buildOpaqueType(SgName(buf2),globals),
-                                 arr_def->size_expr));
+    SgName(std::string(buf1)), buildArrayType(
+      buildOpaqueType(SgName(buf2),globals),
+      arr_def->size_expr));
   SgInitializedNamePtrList& variables = consvar_decl->get_variables();
   SgInitializedNamePtrList::const_iterator j = variables.begin();
   SgInitializedName* initializedName = *j;
   SgVariableSymbol* consvar_sym = new SgVariableSymbol(initializedName);
   prependStatement(consvar_decl, globals);
-
+  
   consvar_sym->set_parent(symtab);
   symtab->insert(SgName(std::string(buf1)), consvar_sym);
   
   constant->set_mapped_symbol(arr_def->original_name.c_str(), consvar_sym);
   constant->set_vardef(arr_def->original_name.c_str(), arr_def);
+  */ 
+
 }
 
 /*
@@ -1195,6 +1043,8 @@ static void setupConstantVar(constant_memory_mapping* constant, VarDefs* arr_def
  *   stmt_list - the GPU functions' statement list
  */
 static void cudaBindConstantVar(constant_memory_mapping* constant, VarDefs* arr_def, SgGlobal* globals, SgStatementPtrList* stmt_list) {
+  debug_fprintf(stderr, "cudaBindConstantVar()  die\n");  int *i=0; int j=i[0]; 
+  /* 
   SgName cudaMemcpyToSymbol_name("cudaMemcpyToSymbol");
   SgFunctionDeclaration* cudaMemcpyToSymbol_decl = buildNondefiningFunctionDeclaration(
     cudaMemcpyToSymbol_name, buildVoidType(), buildFunctionParameterList(), globals);
@@ -1204,10 +1054,10 @@ static void cudaBindConstantVar(constant_memory_mapping* constant, VarDefs* arr_
   args->append_expression(buildVarRefExp(arr_def->in_data));
   args->append_expression(arr_def->size_expr);
   stmt_list->push_back(buildExprStatement(
-    buildFunctionCallExp(buildFunctionRefExp(cudaMemcpyToSymbol_decl), args)));
+                         buildFunctionCallExp(buildFunctionRefExp(cudaMemcpyToSymbol_decl), args)));
 }
 
-static void consmapArrayRefs(constant_memory_mapping* constant, std::vector<IR_ArrayRef*>* refs, SgGlobal* globals, IR_Code* ir, CG_roseBuilder* ocg) {
+//static void consmapArrayRefs(constant_memory_mapping* constant, std::vector<IR_ArrayRef*>* refs, SgGlobal* globals, IR_Code* ir, CG_roseBuilder* ocg) {
   // if constant mapping is not being used, ignore this function
   if(constant == NULL) return;
   for(int i = 0; i < refs->size(); i++) {
@@ -1237,6 +1087,7 @@ static void consmapArrayRefs(constant_memory_mapping* constant, std::vector<IR_A
       ir->ReplaceExpression(aref, new CG_roseRepr(buildPntrArrRefExp(varexp, index_exp)));
     }
   }
+  */ 
 }
 
 /*
@@ -1284,9 +1135,13 @@ static void setupTexmappingVar(texture_memory_mapping* texture, VarDefs* arr_def
  * see cudaBindTexture for details
  */
 static SgFunctionCallExp* cudaBindTexture1D(texture_memory_mapping* texture, VarDefs* arr_def, SgGlobal* globals) {
+  debug_fprintf(stderr, "cudaBindTexture1D() die\n"); int *i=0; int j = i[0];
+  return NULL; 
+
+  /* 
   SgName cudaBindTexture_name("cudaBindTexture");
   SgFunctionDeclaration* cudaBindTexture_decl = buildNondefiningFunctionDeclaration(
-      cudaBindTexture_name, buildVoidType(), buildFunctionParameterList(), globals);
+    cudaBindTexture_name, buildVoidType(), buildFunctionParameterList(), globals);
   
   SgExprListExp* args = buildExprListExp();
   args->append_expression(buildIntVal(0));
@@ -1294,6 +1149,7 @@ static SgFunctionCallExp* cudaBindTexture1D(texture_memory_mapping* texture, Var
   args->append_expression(texture->get_devptr_symbol_exp(arr_def->original_name.c_str()));
   args->append_expression(arr_def->size_expr);
   return buildFunctionCallExp(buildFunctionRefExp(cudaBindTexture_decl), args);
+  */ 
 }
 
 /*
@@ -1330,8 +1186,8 @@ static void cudaBindTexture(texture_memory_mapping* texture, VarDefs* arr_def, S
   //int dims = (int)(arr_def->size_multi_dim.size());
   //int dims = texture->get_dims(arr_def->original_name.c_str());
   //if(dims == 1)
-    stmt_list->push_back(
-      buildExprStatement(cudaBindTexture1D(texture, arr_def, globals)));
+  stmt_list->push_back(
+    buildExprStatement(cudaBindTexture1D(texture, arr_def, globals)));
   //if(dims == 2)
   //  stmt_list->push_back(
   //    buildExprStatement(cudaBindTexture2D(texture, arr_def, globals)));
@@ -1346,8 +1202,8 @@ static void cudaBindTexture(texture_memory_mapping* texture, VarDefs* arr_def, S
  *    globals - global symbol table
  *    ir      - handles IR_Code operations
  *    ocg     - handles CG_roseBuilder operations
-**/
-static void texmapArrayRefs(texture_memory_mapping* texture, std::vector<IR_ArrayRef*>* refs, SgGlobal* globals, IR_Code* ir, CG_roseBuilder *ocg) {
+ **/
+static void texmapArrayRefs(texture_memory_mapping* texture, std::vector<IR_ArrayRef*>* refs, SgGlobal* globals, IR_Code* ir, CG_outputBuilder *ocg) {
   // if texture mapping is not being used, ignore this function
   if(texture == NULL) return;
   for(int i = 0; i < refs->size(); i++) {
@@ -1368,7 +1224,7 @@ static void texmapArrayRefs(texture_memory_mapping* texture, std::vector<IR_Arra
       sprintf(texNDfetch_strName, "tex%dDfetch", 1); // for now, only support tex1Dfetch
       //sprintf(texNDfetch_strName, "tex%dDfetch", dims);
       SgFunctionDeclaration* fetch_decl = buildNondefiningFunctionDeclaration(
-          SgName(texNDfetch_strName), buildFloatType(), buildFunctionParameterList(), globals);
+        SgName(texNDfetch_strName), buildFloatType(), buildFunctionParameterList(), globals);
       
       // build args
       SgExprListExp* args = buildExprListExp();
@@ -1396,1487 +1252,901 @@ static void texmapArrayRefs(texture_memory_mapping* texture, std::vector<IR_Arra
   }
 }
 
-SgNode* LoopCuda::cudaize_codegen_v2() {
-    if(cudaDebug)
-	printf("cudaize codegen V2\n");
-  CG_roseBuilder *ocg = dynamic_cast<CG_roseBuilder*>(ir->builder());
-  if (!ocg)
-    return false;
 
- //protonu--adding an annote to track texture memory type
+
+chillAST_node* LoopCuda::cudaize_codegen_v2() {
+  debug_fprintf(stderr, "cudaize codegen V2 (ROSE)\n");
+  for(std::map<std::string, int>::iterator it = array_dims->begin(); it != array_dims->end(); it++)  {
+    debug_fprintf(stderr, "array_dims  '%s'  %d\n", it->first.c_str(), it->second)
+  }
+
+  //protonu--adding an annote to track texture memory type
   //ANNOTE(k_cuda_texture_memory, "cuda texture memory", TRUE);
   //ANNOTE(k_cuda_constant_memory, "cuda constant memory", TRUE);
+
   int tex_mem_on = 0;
   int cons_mem_on = 0;
-
-
+  
   
   CG_outputRepr* repr;
+
+
   std::vector<VarDefs> arrayVars;
   std::vector<VarDefs> localScopedVars;
   
-  std::vector<IR_ArrayRef *> ro_refs;
-  std::vector<IR_ArrayRef *> wo_refs;
   std::set<std::string> uniqueRefs;
   std::set<std::string> uniqueWoRefs;
-  std::set<const SgVariableSymbol *> syms;
-  std::set<const SgVariableSymbol *> psyms;
-  std::set<const SgVariableSymbol *> pdSyms;
-  SgStatementPtrList* replacement_list = new SgStatementPtrList;
+  std::vector<IR_ArrayRef *> ro_refs;
+  std::vector<IR_ArrayRef *> wo_refs;
+
+  std::vector<chillAST_VarDecl *> parameterSymbols; 
   
+  // the C code function will become the GPUside function
+
+  // this is dumb. The only thing we've got is the position of the function in the file.
+  // we remove the function body abd build a new one.
+  // the parameters are not in the right order (probably)
+  
+  chillAST_FunctionDecl *origfunction =  function_that_contains_this_loop; 
+  const char *fname = origfunction->functionName;
+  int numparams = origfunction->parameters.size();
+  //debug_fprintf(stderr, "func 0x%x has name 0x%x  %d parameters\n", func, fname, numparams); 
+
+
+
+
+  // make a new function that will be the CPU side cuda code
+  // it will take the name and parameters from the original C code 
+  chillAST_node *p = origfunction->getParent();
+  debug_fprintf(stderr, "parent of func is a %s with %d children\n", 
+          p->getTypeString(), p->getNumChildren()); 
+  chillAST_SourceFile *srcfile = origfunction->getSourceFile();
+  debug_fprintf(stderr, "srcfile of func is %s\n", srcfile->SourceFileName );
+
+
+
+  chillAST_FunctionDecl *CPUsidefunc = new chillAST_FunctionDecl(origfunction->returnType, fname,p);
+  for (int i=0; i<numparams; i++) { 
+    CPUsidefunc->addParameter( origfunction->parameters[i] ) ; 
+  }
+  chillAST_CompoundStmt *CPUfuncbody =  new chillAST_CompoundStmt; // so we can easily access
+  CPUsidefunc->setBody( CPUfuncbody ); // but empty 
+  //CPUsidefunc->setParent( origfunction->getParent() ); // unneeded
+
+
+  debug_fprintf(stderr, "kernel name should be %s (?)\n", cu_kernel_name.c_str()); 
+  chillAST_FunctionDecl *GPUKernel =  new  chillAST_FunctionDecl( origfunction->returnType /* ?? */,
+                                                                  cu_kernel_name.c_str(), // fname, 
+                                                                  p); 
+  chillAST_CompoundStmt *GPUkernelbody =  new chillAST_CompoundStmt; // so we can easily access
+  GPUKernel->setBody( GPUkernelbody ); // but empty 
+
+  
+  // change name of GPU side function 
+  int which = p->findChild( origfunction ); 
+  debug_fprintf(stderr, "func is child %d of srcfile\n", which);
+  p->insertChild( which,  GPUKernel );
+  p->insertChild( which,  CPUsidefunc );
+
+
+  //which = p->findChild( CPUsidefunc ); 
+  //debug_fprintf(stderr, "\nCPUsidefunc is now child %d of srcfile\n", which);
+  //which = p->findChild( GPUKernel ); 
+  //debug_fprintf(stderr, "GPUKernel is now child %d of srcfile\n", which);
+  which = p->findChild( origfunction ); 
+  //debug_fprintf(stderr, "original function  is now child %d of srcfile\n", which);
+  //p->removeChild ( ) or similar to remove original 
+  p->removeChild( which ); 
+
+
+  char *part = strdup( srcfile->SourceFileName );
+  char *dot = rindex( part, '.' );
+  if  (dot) { 
+    *dot = '\0';
+  }
+
+  // name is passed to cudaize, and stored in LoopCuda
+  //char newname[800];
+  //sprintf(newname, "%s_GPU\0", part);
+  //debug_fprintf(stderr, "GPU side function will be %s\n", newname ); 
+  //GPUKernel->setName( newname ); 
+
+  GPUKernel->setFunctionGPU();   
+  chillAST_CompoundStmt *kernelbody = new chillAST_CompoundStmt;
+  GPUKernel->setBody( kernelbody );
+  
+
+  CPUsidefunc->print(); printf("\n\n"); fflush(stdout); 
+  GPUKernel->print();   printf("\n\n"); fflush(stdout); 
+
+
+  
+  
+  debug_fprintf(stderr, "this loop is in function %s\n", fname); 
+  debug_fprintf(stderr, "function %s has %d parameters:\n",  fname, numparams ); 
+  for (int i=0; i< function_that_contains_this_loop->parameters.size(); i++) { 
+    debug_fprintf(stderr, "%d/%d  %s\n", i, numparams,  function_that_contains_this_loop->parameters[i]->varname); 
+  }
+  
+  
+  
+  
+  debug_fprintf(stderr, "%d statements\n", stmt.size()); 
   for (int j = 0; j < stmt.size(); j++) {
+    debug_fprintf(stderr, "\nstmt j %d\n", j); 
     std::vector<IR_ArrayRef *> refs = ir->FindArrayRef(stmt[j].code);
+    debug_fprintf(stderr, "%d array references in stmt j %d\n", refs.size(), j); 
+    
+    debug_fprintf(stderr, "\nabout to dump statement j %d\n", j); 
+    CG_chillRepr * repr = (CG_chillRepr *) stmt[j].code;
+    repr->dump(); 
+    fflush(stdout); debug_fprintf(stderr, "\n\n\n\n");
+    
     for (int i = 0; i < refs.size(); i++) {
-      //printf("ref %s wo %d\n", static_cast<const char*>(refs[i]->name()), refs[i]->is_write());
-      SgVariableSymbol* var = body_symtab->find_variable(
-        SgName((char*) refs[i]->name().c_str()));
-      SgVariableSymbol* var2 = parameter_symtab->find_variable(
-        SgName((char*) refs[i]->name().c_str()));
+      //const char *vname = static_cast<const char*>(refs[i]->name().c_str());
+      char *vname = strdup( refs[i]->name().c_str() ) ; // just for printing 
+      printf("ref i %d, ref var %s, write? %d\n", i, vname, refs[i]->is_write());
+      fflush(stdout); 
       
-      //If the array is not a parameter, then it's a local array and we
-      //want to recreate it as a stack variable in the kernel as opposed to
-      //passing it in.
-      if (var != NULL) {
-        //anand-- needs modification, if variable is parameter it wont be part of the
-        // block's symbol table but the functiond definition's symbol table
-        
+      // at this point, GPUkernel has no parameters, we're creating them now.
+      // look to see if the original function had these parameters
+      chillAST_VarDecl *param = origfunction->hasParameterNamed( refs[i]->name().c_str() ); 
+      if (!param) { 
+        //debug_fprintf(stderr, "variable %s is NOT a parameter, it must be defined in the function body\n",vname); 
         continue;
       }
+      
+      //debug_fprintf(stderr, "%s is a parameter of original function\n", vname);
+      debug_fprintf(stderr, "%s is a parameter\n", vname);
+      
+      // see if this ref is in uniqueRefs
       if (uniqueRefs.find(refs[i]->name()) == uniqueRefs.end()) {
         
-        uniqueRefs.insert(refs[i]->name());
+        debug_fprintf(stderr, "adding variable %s to uniqueRefs\n", vname); 
+        // if not, add it
+        uniqueRefs.insert(refs[i]->name()); 
+        
+        // and if it's a write, add it to Unique Write (Only?) Refs as well
         if (refs[i]->is_write()) {
-          uniqueWoRefs.insert(refs[i]->name());
-          wo_refs.push_back(refs[i]);
-        } else
+          debug_fprintf(stderr, "adding variable %s to unique WRITE Refs\n", vname); 
+          uniqueWoRefs.insert(refs[i]->name()); // a set
+          wo_refs.push_back(refs[i]);           // a vector of the same info? 
+        } else { 
           ro_refs.push_back(refs[i]);
+        }
       }
+      
+      
       if (refs[i]->is_write()
-          && uniqueWoRefs.find(refs[i]->name())
-          == uniqueWoRefs.end()) {
+          && (uniqueWoRefs.find(refs[i]->name()) == uniqueWoRefs.end())) { // wasn't there before
+        debug_fprintf(stderr, "adding variable %s to unique WRITE Refs even though we'd seen it as a read before\n", vname); 
         uniqueWoRefs.insert(refs[i]->name());
         wo_refs.push_back(refs[i]);
         //printf("adding %s to wo\n", static_cast<const char*>(refs[i]->name()));
       }
-      pdSyms.insert((const SgVariableSymbol*) var2);
+      
+      // do a std::set manually
+      bool inthere = false;
+      for (int k=0; k<parameterSymbols.size(); k++) { 
+        if (!strcmp( param->varname, parameterSymbols[k]->varname)) inthere = true;
+      }
+      if (!inthere) parameterSymbols.push_back( param ) ; 
+      debug_fprintf(stderr, "parameterSymbols now has %d elements\n", parameterSymbols.size()); 
+
+      //pdSyms.insert((const chillAST_VarDecl*) param);
+      //debug_fprintf(stderr, "pdsyms now has %d elements\n", pdSyms.size()); 
     }
-  }
+  } // for each stmt 
   
-  if (cudaDebug) {
-      printf("reading from array ");
-      for (int i = 0; i < ro_refs.size(); i++)
-	  printf("'%s' ", ro_refs[i]->name().c_str());
-      printf("and writing to array ");
-      for (int i = 0; i < wo_refs.size(); i++)
-	  printf("'%s' ", wo_refs[i]->name().c_str());
-      printf("\n");
-  }  
-  const char* gridName = "dimGrid";
+  debug_fprintf(stderr, "we read from %d parameter arrays, and write to %d parameter arrays\n", ro_refs.size(), wo_refs.size()); 
+  printf("reading from array parameters ");
+  for (int i = 0; i < ro_refs.size(); i++)
+    printf("'%s' ", ro_refs[i]->name().c_str());
+  printf("and writing to array parameters ");
+  for (int i = 0; i < wo_refs.size(); i++)
+    printf("'%s' ", wo_refs[i]->name().c_str());
+  printf("\n"); fflush(stdout); 
+  
+
+
+
+  const char* gridName  = "dimGrid";       // hardcoded 
   const char* blockName = "dimBlock";
   
   //TODO: Could allow for array_dims_vars to be a mapping from array
   //references to to variable names that define their length.
-  SgVariableSymbol* dim1 = 0;
-  SgVariableSymbol* dim2 = 0;
   
   for (int i = 0; i < wo_refs.size(); i++) {
-    //TODO: Currently assume all arrays are floats of one or two dimentions
-    SgVariableSymbol* outArray = 0;
     std::string name = wo_refs[i]->name();
-    outArray = body_symtab->find_variable(SgName((char*) name.c_str()));
-    int size_n_d;
-    if (outArray == NULL)
-      outArray = parameter_symtab->find_variable(
-        SgName((char*) name.c_str()));
     
-    VarDefs v;
+    debug_fprintf(stderr, "\nwritten parameter %d %s\n", i, name.c_str()); 
+    
+    char *tmpname = strdup( name.c_str() ); 
+    // find the variable declaration in original 
+    chillAST_VarDecl *param = origfunction->findParameterNamed( tmpname ); 
+    if (!param) { 
+      debug_fprintf(stderr, "loop_cuda_ROSE.cc can't find wo parameter named %s in function %s\n",tmpname,fname);
+      exit(-1); 
+    }
+    //param->print(); printf("\n"); fflush(stdout); 
+    
+    VarDefs v; // scoping seems wrong/odd
     v.size_multi_dim = std::vector<int>();
     char buf[32];
     snprintf(buf, 32, "devO%dPtr", i + 1);
     v.name = buf;
-    if (isSgPointerType(outArray->get_type())) {
-      if (isSgArrayType(
-            isSgNode(
-              isSgPointerType(outArray->get_type())->get_base_type()))) {
-        //  v.type = ((array_type *)(((ptr_type *)(outArray->type()))->ref_type()))->elem_type();
-        SgType* t =
-          isSgPointerType(outArray->get_type())->get_base_type();
-        /*   SgExprListExp* dimList = t->get_dim_info();
-             SgExpressionPtrList::iterator j= dimList->get_expressions().begin();
-             SgExpression* expr=NULL;
-             for (; j != dimList->get_expressions().end(); j++)
-             expr = *j;
-        */
-        while (isSgArrayType(t))
-          t = isSgArrayType(t)->get_base_type();
-        
-        if (!isSgType(t)) {
-          char buf[1024];
-          sprintf(buf, "CudaizeCodeGen: Array type undetected!");
-          throw std::runtime_error(buf);
-          
-        }
-        
-        v.type = t;
-      } else
-        v.type = isSgPointerType(outArray->get_type())->get_base_type();
-    } else if (isSgArrayType(outArray->get_type())) {
-      if (isSgArrayType(
-            isSgNode(
-              isSgArrayType(outArray->get_type())->get_base_type()))) {
-        //  v.type = ((array_type *)(((ptr_type *)(outArray->type()))->ref_type()))->elem_type();
-        SgType* t =
-          isSgArrayType(outArray->get_type())->get_base_type();
-        /*   SgExprListExp* dimList = t->get_dim_info();
-             SgExpressionPtrList::iterator j= dimList->get_expressions().begin();
-             SgExpression* expr=NULL;
-             for (; j != dimList->get_expressions().end(); j++)
-             expr = *j;
-        */
-        while (isSgArrayType(t))
-          t = isSgArrayType(t)->get_base_type();
-        
-        if (!isSgType(t)) {
-          char buf[1024];
-          sprintf(buf, "CudaizeCodeGen: Array type undetected!");
-          throw std::runtime_error(buf);
-          
-        }
-        
-        v.type = t;
-      } else
-        v.type = isSgArrayType(outArray->get_type())->get_base_type();
-    } else
-      v.type = buildFloatType();
-    v.tex_mapped = false;
-    v.cons_mapped = false;
-    v.original_name = wo_refs[i]->name();
-    //Size of the array = dim1 * dim2 * num bytes of our array type
+    v.original_name = name; 
     
-    //If our input array is 2D (non-linearized), we want the actual
-    //dimentions of the array
-    CG_outputRepr* size;
-    //Lookup in array_dims
-    std::map<std::string, int>::iterator it = array_dims.find(name.c_str());
-    if (isSgPointerType(outArray->get_type())
-        && isSgArrayType(
-          isSgNode(
-            isSgPointerType(outArray->get_type())->get_base_type()))) {
-      SgType* t = isSgPointerType(outArray->get_type())->get_base_type();
-      /*   SgExprListExp* dimList = t->get_dim_info();
-           SgExpressionPtrList::iterator j= dimList->get_expressions().begin();
-           SgExpression* expr=NULL;
-           for (; j != dimList->get_expressions().end(); j++)
-           expr = *j;
-      */
-      if (isSgIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedLongVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedLongVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgLongIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgLongLongIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgLongIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedLongLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedLongLongIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgAddOp(isSgArrayType(t)->get_index())) {
-        SgAddOp *op_add = isSgAddOp(isSgArrayType(t)->get_index());
-        
-        SgExpression *lhs = op_add->get_lhs_operand();
-        SgExpression *rhs = op_add->get_rhs_operand();
-        
-        if (isSgIntVal(lhs))
-          size_n_d = (int) isSgIntVal(lhs)->get_value() + (int) (isSgIntVal(rhs)->get_value());
-        else if (isSgUnsignedIntVal(lhs))
-          size_n_d = (int) isSgUnsignedIntVal(lhs)->get_value()
-            + (int) isSgUnsignedIntVal(rhs)->get_value();
-        else if (isSgUnsignedLongVal(lhs))
-          size_n_d = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongIntVal(lhs))
-          size_n_d = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongLongIntVal(lhs))
-          size_n_d = (int) (isSgLongLongIntVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongIntVal(lhs))
-          size_n_d = (int) (isSgLongIntVal(lhs)->get_value()
-                            + isSgLongIntVal(rhs)->get_value());
-        else if (isSgUnsignedLongLongIntVal(lhs))
-          size_n_d =
-            (int) (isSgUnsignedLongLongIntVal(lhs)->get_value()
-                   + isSgUnsignedLongLongIntVal(rhs)->get_value());
-        
+    v.tex_mapped  = false;
+    v.cons_mapped = false;
+    
+    // find the underlying type of the array
+    debug_fprintf(stderr, "finding underlying type of %s to make variable %s match\n",name.c_str(),buf);
+    v.type = strdup(param->underlyingtype); // memory leak 
+    //debug_fprintf(stderr, "v.type is %s\n", param->underlyingtype); 
+    
+    chillAST_node *so = new chillAST_Sizeof( v.type ); 
+    //CG_chillRepr *thingsize = new omega::CG_chillRepr(  so );
+    
+    debug_fprintf(stderr, "\nloop_cuda_xxxx.cc  calculating size of output %s\n", buf ); 
+
+    int numitems = 1;
+    if (param->numdimensions < 1 || 
+        param->arraysizes == NULL) { 
+      //Lookup in array_dims (the cudaize call has this info for some variables?) 
+      std::map<std::string, int>::iterator it = array_dims.find(name.c_str());
+      if (it == array_dims.end()) { debug_fprintf(stderr, "Can't find %s in array_dims\n", name.c_str()); 
+        numitems = 123456;
       }
-      t = isSgArrayType(t)->get_base_type();
-      while (isSgArrayType(t)) {
-        int dim;
-        if (isSgIntVal(isSgArrayType(t)->get_index()))
-          dim =
-            (int) (isSgIntVal(isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedLongVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedLongVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedLongLongIntVal(
-                   isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedLongLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgAddOp(isSgArrayType(t)->get_index())) {
-          SgAddOp *op_add = isSgAddOp(isSgArrayType(t)->get_index());
-          
-          SgExpression *lhs = op_add->get_lhs_operand();
-          SgExpression *rhs = op_add->get_rhs_operand();
-          
-          if (isSgIntVal(lhs))
-            dim = (int) isSgIntVal(lhs)->get_value()
-              + (int) (isSgIntVal(rhs)->get_value());
-          else if (isSgUnsignedIntVal(lhs))
-            dim = (int) isSgUnsignedIntVal(lhs)->get_value()
-              + (int) isSgUnsignedIntVal(rhs)->get_value();
-          else if (isSgUnsignedLongVal(lhs))
-            dim = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongIntVal(lhs))
-            dim = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongLongIntVal(lhs))
-            dim = (int) (isSgLongLongIntVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongIntVal(lhs))
-            dim = (int) (isSgLongIntVal(lhs)->get_value()
-                         + isSgLongIntVal(rhs)->get_value());
-          else if (isSgUnsignedLongLongIntVal(lhs))
-            dim =
-              (int) (isSgUnsignedLongLongIntVal(lhs)->get_value()
-                     + isSgUnsignedLongLongIntVal(rhs)->get_value());
-          
-        }
-        size_n_d *= dim;
-        v.size_multi_dim.push_back(dim);
-        t = isSgArrayType(t)->get_base_type();
-      }
-      //v.size_2d = (int) (isSgIntVal(t->get_index())->get_value());
-      
-      if (cudaDebug)
-	  printf("Detected Multi-dimensional array sized of %d for %s\n",
-		 size_n_d, (char*) wo_refs[i]->name().c_str());
-      size = ocg->CreateInt(size_n_d);
-    } else if (isSgArrayType(outArray->get_type())
-               && isSgArrayType(
-                 isSgNode(
-                   isSgArrayType(outArray->get_type())->get_base_type()))) {
-      SgType* t = outArray->get_type();
-      /*   SgExprListExp* dimList = t->get_dim_info();
-           SgExpressionPtrList::iterator j= dimList->get_expressions().begin();
-           SgExpression* expr=NULL;
-           for (; j != dimList->get_expressions().end(); j++)
-           expr = *j;
-      */
-      
-      if (isSgIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedLongVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedLongVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgLongIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgLongLongIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgLongIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedLongLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedLongLongIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgAddOp(isSgArrayType(t)->get_index())) {
-        SgAddOp *op_add = isSgAddOp(isSgArrayType(t)->get_index());
-        
-        SgExpression *lhs = op_add->get_lhs_operand();
-        SgExpression *rhs = op_add->get_rhs_operand();
-        
-        if (isSgIntVal(lhs))
-          size_n_d = (int) isSgIntVal(lhs)->get_value() + (int) (isSgIntVal(rhs)->get_value());
-        else if (isSgUnsignedIntVal(lhs))
-          size_n_d = (int) isSgUnsignedIntVal(lhs)->get_value()
-            + (int) isSgUnsignedIntVal(rhs)->get_value();
-        else if (isSgUnsignedLongVal(lhs))
-          size_n_d = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongIntVal(lhs))
-          size_n_d = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongLongIntVal(lhs))
-          size_n_d = (int) (isSgLongLongIntVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongIntVal(lhs))
-          size_n_d = (int) (isSgLongIntVal(lhs)->get_value()
-                            + isSgLongIntVal(rhs)->get_value());
-        else if (isSgUnsignedLongLongIntVal(lhs))
-          size_n_d =
-            (int) (isSgUnsignedLongLongIntVal(lhs)->get_value()
-                   + isSgUnsignedLongLongIntVal(rhs)->get_value());
-        
-      }
-      t = isSgArrayType(t)->get_base_type();
-      while (isSgArrayType(t)) {
-        int dim;
-        if (isSgIntVal(isSgArrayType(t)->get_index()))
-          dim =
-            (int) (isSgIntVal(isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedLongVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedLongVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedLongLongIntVal(
-                   isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedLongLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgAddOp(isSgArrayType(t)->get_index())) {
-          SgAddOp *op_add = isSgAddOp(isSgArrayType(t)->get_index());
-          
-          SgExpression *lhs = op_add->get_lhs_operand();
-          SgExpression *rhs = op_add->get_rhs_operand();
-          
-          if (isSgIntVal(lhs))
-            dim = (int) isSgIntVal(lhs)->get_value()
-              + (int) (isSgIntVal(rhs)->get_value());
-          else if (isSgUnsignedIntVal(lhs))
-            dim = (int) isSgUnsignedIntVal(lhs)->get_value()
-              + (int) isSgUnsignedIntVal(rhs)->get_value();
-          else if (isSgUnsignedLongVal(lhs))
-            dim = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongIntVal(lhs))
-            dim = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongLongIntVal(lhs))
-            dim = (int) (isSgLongLongIntVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongIntVal(lhs))
-            dim = (int) (isSgLongIntVal(lhs)->get_value()
-                         + isSgLongIntVal(rhs)->get_value());
-          else if (isSgUnsignedLongLongIntVal(lhs))
-            dim =
-              (int) (isSgUnsignedLongLongIntVal(lhs)->get_value()
-                     + isSgUnsignedLongLongIntVal(rhs)->get_value());
-          
-        }
-        size_n_d *= dim;
-        v.size_multi_dim.push_back(dim);
-        t = isSgArrayType(t)->get_base_type();
-      }
-      
-      //v.size_2d = (int) (isSgIntVal(t->get_index())->get_value());
-      
-      if (cudaDebug)
-	  printf("Detected Multi-Dimensional array sized of %d for %s\n",
-		 size_n_d, (char*) wo_refs[i]->name().c_str());
-      size = ocg->CreateInt(size_n_d);
-    } else if (it != array_dims.end()) {
-      int ref_size = it->second;
-      //size =
-      //        ocg->CreateInt(
-      //                isSgIntVal(
-      //                        isSgArrayType(outArray->get_type())->get_index())->get_value());
-      //v.size_2d = isSgArrayType(outArray->get_type())->get_rank();
-      //v.var_ref_size = ref_size;
-      size = ocg->CreateInt(ref_size);
-      
-    } else {
-      if (dim1) {
-        size = ocg->CreateTimes(
-          new CG_roseRepr(isSgExpression(buildVarRefExp(dim1))),
-          new CG_roseRepr(isSgExpression(buildVarRefExp(dim2))));
-      } else {
-        char buf[1024];
-        sprintf(buf,
-                "CudaizeCodeGen: Array reference %s does not have a "
-                "detectable size or specififed dimentions",
-                name.c_str());
-        throw std::runtime_error(buf);
+      else { 
+        debug_fprintf(stderr, "it %s %d\n", (*it).first.c_str(), (*it).second);  
+        numitems = (*it).second; 
       }
     }
+    else { 
+      debug_fprintf(stderr, "numdimensions = %d\n", param->numdimensions);
+      for (int i=0; i<param->numdimensions; i++) { 
+        numitems *= param->arraysizes[i]; 
+      }
+    } 
+
+
+    chillAST_IntegerLiteral *numthings = new chillAST_IntegerLiteral( numitems ); 
     
-    v.size_expr =
-      static_cast<CG_roseRepr*>(ocg->CreateTimes(size,
-                                                 new omega::CG_roseRepr(
-                                                   isSgExpression(buildSizeOfOp(v.type)))))->GetExpression();
+    debug_fprintf(stderr, "creating int mult size expression numitems %d x sizeof( %s )\n", numitems, v.type ); 
     
+    // create a mult  
+    v.size_expr = new chillAST_BinaryOperator( numthings, "*", so, NULL); 
+    
+    v.CPUside_param = param;
     v.in_data = 0;
-    v.out_data = outArray;
-    //Check for in ro_refs and remove it at this point
+    v.out_data = param;
+    
+    //Check for this variable in ro_refs and remove it at this point if it is both read and write
     std::vector<IR_ArrayRef *>::iterator it_;
     for (it_ = ro_refs.begin(); it_ != ro_refs.end(); it_++) {
       if ((*it_)->name() == wo_refs[i]->name()) {
+        debug_fprintf(stderr, "found array ref for %s in ro, removing it from writes\n", (*it_)->name().c_str()); 
         break;
       }
     }
     if (it_ != ro_refs.end()) {
-      v.in_data = outArray;
+      v.in_data = param;           // ?? 
       ro_refs.erase(it_);
     }
     
+    debug_fprintf(stderr, "loop_cuda_rose.ccc L1537 adding written v to arrayVars\n\n"); 
+    v.print(); 
     arrayVars.push_back(v);
-    
-  }
+  } //  wo_refs 
   
-  //protonu-- assuming that all texture mapped memories were originally read only mems
-  //there should be safety checks for that, will implement those later
+  
+  
+  
+  
+  
+  
   
   for (int i = 0; i < ro_refs.size(); i++) {
-    SgVariableSymbol* inArray = 0;
     std::string name = ro_refs[i]->name();
-    inArray = body_symtab->find_variable(SgName((char*) name.c_str()));
-    if (inArray == NULL)
-      inArray = parameter_symtab->find_variable(
-        SgName((char*) name.c_str()));
+    char *tmpname = strdup( name.c_str() ); 
     
-    VarDefs v;
+    debug_fprintf(stderr, "\nread parameter %d %s \n", i, name.c_str()); 
+    
+    // find the variable declaration 
+    chillAST_VarDecl *param = origfunction->findParameterNamed( tmpname ); 
+    if (!param) { 
+      debug_fprintf(stderr, "loop_cuda_ROSE2.cc can't find ro parameter named %s in function %s\n",tmpname,fname);
+      exit(-1);
+    }
+    
+    VarDefs v; // scoping seems wrong/odd
     v.size_multi_dim = std::vector<int>();
     char buf[32];
     snprintf(buf, 32, "devI%dPtr", i + 1);
     v.name = buf;
-    int size_n_d;
-    if (isSgPointerType(inArray->get_type())) {
-      if (isSgArrayType(
-            isSgNode(
-              isSgPointerType(inArray->get_type())->get_base_type()))) {
-        
-        SgType* t =
-          isSgPointerType(inArray->get_type())->get_base_type();
-        
-        while (isSgArrayType(t))
-          t = isSgArrayType(t)->get_base_type();
-        
-        if (!isSgType(t)) {
-          char buf[1024];
-          sprintf(buf, "CudaizeCodeGen: Array type undetected!");
-          throw std::runtime_error(buf);
-          
-        }
-        v.type = t;
-      } else
-        v.type = isSgPointerType(inArray->get_type())->get_base_type();
-    } else if (isSgArrayType(inArray->get_type())) {
-      if (isSgArrayType(
-            isSgNode(
-              isSgArrayType(inArray->get_type())->get_base_type()))) {
-        
-        SgType* t = inArray->get_type();
-        while (isSgArrayType(t))
-          t = isSgArrayType(t)->get_base_type();
-        
-        if (!isSgType(t)) {
-          char buf[1024];
-          sprintf(buf, "CudaizeCodeGen: Array type undetected!");
-          throw std::runtime_error(buf);
-          
-        }
-        v.type = t;
-      } else
-        v.type = isSgArrayType(inArray->get_type())->get_base_type();
-    }
-    
-    else
-      v.type = buildFloatType();
-    
+    v.original_name = name; 
     v.tex_mapped = false;
     v.cons_mapped = false;
-    v.original_name = ro_refs[i]->name();
+
+
+    // find the underlying type of the array
+    debug_fprintf(stderr, "finding underlying type of %s to make variable %s match\n",name.c_str(),buf);
+    v.type = strdup(param->underlyingtype); // memory leak 
+    //debug_fprintf(stderr, "v.type is %s\n", param->underlyingtype); 
+    chillAST_node *so = new chillAST_Sizeof( v.type ); 
     
+#ifdef NOTYET
     //derick -- adding texture and constant mapping
-    if ( texture != NULL)
+    if ( texture != NULL) { 
       v.tex_mapped = (texture->is_array_mapped(name.c_str()))? true:false; //protonu-track tex mapped vars
+    }
     if (v.tex_mapped){
       printf("this variable  %s is mapped to texture memory", name.c_str());
     }
     //derick -- this is commented out until constant memory is implemeted
-    if ( constant_mem != NULL)
+    if ( constant_mem != NULL) { 
       v.cons_mapped = (constant_mem->is_array_mapped(name.c_str()))? true:false; //protonu-track tex mapped vars
+    }
     if (v.cons_mapped){
       printf("this variable  %s is mapped to constant memory", name.c_str());
     }
+#endif  // NOTYET
     
+    //debug_fprintf(stderr, "\ncalculating size of input %s\n", buf );    
     //Size of the array = dim1 * dim2 * num bytes of our array type
     //If our input array is 2D (non-linearized), we want the actual
-    //dimentions of the array (as it might be less than cu_n
-    CG_outputRepr* size;
-    //Lookup in array_dims
-    std::map<std::string, int>::iterator it = array_dims.find(name.c_str());
-    if (isSgPointerType(inArray->get_type())
-        && isSgArrayType(
-          isSgPointerType(inArray->get_type())->get_base_type())) {
-      //SgArrayType* t = isSgArrayType(isSgArrayType(inArray->get_type())->get_base_type());
-      //v.size_2d = t->get_rank();
-      SgType* t = isSgPointerType(inArray->get_type())->get_base_type();
-      /*   SgExprListExp* dimList = t->get_dim_info();
-           SgExpressionPtrList::iterator j= dimList->get_expressions().begin();
-           SgExpression* expr=NULL;
-           for (; j != dimList->get_expressions().end(); j++)
-           expr = *j;
-      */
-      //v.size_2d = 1;
-      if (isSgIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedLongVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedLongVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgLongIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgLongLongIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgLongIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedLongLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedLongLongIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgAddOp(isSgArrayType(t)->get_index())) {
-        SgAddOp *op_add = isSgAddOp(isSgArrayType(t)->get_index());
-        
-        SgExpression *lhs = op_add->get_lhs_operand();
-        SgExpression *rhs = op_add->get_rhs_operand();
-        
-        if (isSgIntVal(lhs))
-          size_n_d = (int) isSgIntVal(lhs)->get_value() + (int) (isSgIntVal(rhs)->get_value());
-        else if (isSgUnsignedIntVal(lhs))
-          size_n_d = (int) isSgUnsignedIntVal(lhs)->get_value()
-            + (int) isSgUnsignedIntVal(rhs)->get_value();
-        else if (isSgUnsignedLongVal(lhs))
-          size_n_d = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongIntVal(lhs))
-          size_n_d = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongLongIntVal(lhs))
-          size_n_d = (int) (isSgLongLongIntVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongIntVal(lhs))
-          size_n_d = (int) (isSgLongIntVal(lhs)->get_value()
-                            + isSgLongIntVal(rhs)->get_value());
-        else if (isSgUnsignedLongLongIntVal(lhs))
-          size_n_d =
-            (int) (isSgUnsignedLongLongIntVal(lhs)->get_value()
-                   + isSgUnsignedLongLongIntVal(rhs)->get_value());
-        
-      }
-      t = isSgArrayType(t)->get_base_type();
-      while (isSgArrayType(t)) {
-        int dim;
-        if (isSgIntVal(isSgArrayType(t)->get_index()))
-          dim =
-            (int) (isSgIntVal(isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedLongVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedLongVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedLongLongIntVal(
-                   isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedLongLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgAddOp(isSgArrayType(t)->get_index())) {
-          SgAddOp *op_add = isSgAddOp(isSgArrayType(t)->get_index());
-          
-          SgExpression *lhs = op_add->get_lhs_operand();
-          SgExpression *rhs = op_add->get_rhs_operand();
-          
-          if (isSgIntVal(lhs))
-            dim = (int) isSgIntVal(lhs)->get_value()
-              + (int) (isSgIntVal(rhs)->get_value());
-          else if (isSgUnsignedIntVal(lhs))
-            dim = (int) isSgUnsignedIntVal(lhs)->get_value()
-              + (int) isSgUnsignedIntVal(rhs)->get_value();
-          else if (isSgUnsignedLongVal(lhs))
-            dim = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongIntVal(lhs))
-            dim = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongLongIntVal(lhs))
-            dim = (int) (isSgLongLongIntVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongIntVal(lhs))
-            dim = (int) (isSgLongIntVal(lhs)->get_value()
-                         + isSgLongIntVal(rhs)->get_value());
-          else if (isSgUnsignedLongLongIntVal(lhs))
-            dim =
-              (int) (isSgUnsignedLongLongIntVal(lhs)->get_value()
-                     + isSgUnsignedLongLongIntVal(rhs)->get_value());
-          
-        }
-        size_n_d *= dim;
-        v.size_multi_dim.push_back(dim);
-        t = isSgArrayType(t)->get_base_type();
-      }
-      if (cudaDebug)
-	  printf("Detected Multi-dimensional array sized of %d for %s\n",
-		 size_n_d, (char*) ro_refs[i]->name().c_str());
-      size = ocg->CreateInt(size_n_d);
-    } else if (isSgArrayType(inArray->get_type())
-               && isSgArrayType(
-                 isSgArrayType(inArray->get_type())->get_base_type())) {
-      //SgArrayType* t = isSgArrayType(isSgArrayType(inArray->get_type())->get_base_type());
-      //v.size_2d = t->get_rank();
-      SgType* t = inArray->get_type();
-      /*   SgExprListExp* dimList = t->get_dim_info();
-           SgExpressionPtrList::iterator j= dimList->get_expressions().begin();
-           SgExpression* expr=NULL;
-           for (; j != dimList->get_expressions().end(); j++)
-           expr = *j;
-      */
-      
-      if (isSgIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedLongVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedLongVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgLongIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgLongLongIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d =
-          (int) (isSgLongIntVal(isSgArrayType(t)->get_index())->get_value());
-      else if (isSgUnsignedLongLongIntVal(isSgArrayType(t)->get_index()))
-        size_n_d = (int) (isSgUnsignedLongLongIntVal(
-                            isSgArrayType(t)->get_index())->get_value());
-      else if (isSgAddOp(isSgArrayType(t)->get_index())) {
-        SgAddOp *op_add = isSgAddOp(isSgArrayType(t)->get_index());
-        
-        SgExpression *lhs = op_add->get_lhs_operand();
-        SgExpression *rhs = op_add->get_rhs_operand();
-        
-        if (isSgIntVal(lhs))
-          size_n_d = (int) isSgIntVal(lhs)->get_value() + (int) (isSgIntVal(rhs)->get_value());
-        else if (isSgUnsignedIntVal(lhs))
-          size_n_d = (int) isSgUnsignedIntVal(lhs)->get_value()
-            + (int) isSgUnsignedIntVal(rhs)->get_value();
-        else if (isSgUnsignedLongVal(lhs))
-          size_n_d = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongIntVal(lhs))
-          size_n_d = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongLongIntVal(lhs))
-          size_n_d = (int) (isSgLongLongIntVal(lhs)->get_value()
-                            + isSgUnsignedLongVal(rhs)->get_value());
-        else if (isSgLongIntVal(lhs))
-          size_n_d = (int) (isSgLongIntVal(lhs)->get_value()
-                            + isSgLongIntVal(rhs)->get_value());
-        else if (isSgUnsignedLongLongIntVal(lhs))
-          size_n_d =
-            (int) (isSgUnsignedLongLongIntVal(lhs)->get_value()
-                   + isSgUnsignedLongLongIntVal(rhs)->get_value());
-        
-      }
-      t = isSgArrayType(t)->get_base_type();
-      while (isSgArrayType(t)) {
-        int dim;
-        if (isSgIntVal(isSgArrayType(t)->get_index()))
-          dim =
-            (int) (isSgIntVal(isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedLongVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedLongVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgLongIntVal(isSgArrayType(t)->get_index()))
-          dim = (int) (isSgLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgUnsignedLongLongIntVal(
-                   isSgArrayType(t)->get_index()))
-          dim = (int) (isSgUnsignedLongLongIntVal(
-                         isSgArrayType(t)->get_index())->get_value());
-        else if (isSgAddOp(isSgArrayType(t)->get_index())) {
-          SgAddOp *op_add = isSgAddOp(isSgArrayType(t)->get_index());
-          
-          SgExpression *lhs = op_add->get_lhs_operand();
-          SgExpression *rhs = op_add->get_rhs_operand();
-          
-          if (isSgIntVal(lhs))
-            dim = (int) isSgIntVal(lhs)->get_value()
-              + (int) (isSgIntVal(rhs)->get_value());
-          else if (isSgUnsignedIntVal(lhs))
-            dim = (int) isSgUnsignedIntVal(lhs)->get_value()
-              + (int) isSgUnsignedIntVal(rhs)->get_value();
-          else if (isSgUnsignedLongVal(lhs))
-            dim = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongIntVal(lhs))
-            dim = (int) (isSgUnsignedLongVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongLongIntVal(lhs))
-            dim = (int) (isSgLongLongIntVal(lhs)->get_value()
-                         + isSgUnsignedLongVal(rhs)->get_value());
-          else if (isSgLongIntVal(lhs))
-            dim = (int) (isSgLongIntVal(lhs)->get_value()
-                         + isSgLongIntVal(rhs)->get_value());
-          else if (isSgUnsignedLongLongIntVal(lhs))
-            dim =
-              (int) (isSgUnsignedLongLongIntVal(lhs)->get_value()
-                     + isSgUnsignedLongLongIntVal(rhs)->get_value());
-          
-        }
-        size_n_d *= dim;
-        v.size_multi_dim.push_back(dim);
-        t = isSgArrayType(t)->get_base_type();
-      }
-      if (cudaDebug)
-	  printf("Detected Multi-Dimensional array sized of %d for %s\n",
-		 size_n_d, (char*) ro_refs[i]->name().c_str());
-      size = ocg->CreateInt(size_n_d);
-    }
+    //dimensions of the array (as it might be less than cu_n
+    //CG_outputRepr* size;
     
-    else if (it != array_dims.end()) {
-      int ref_size = it->second;
-      //                v.var_ref_size = ref_size;
-      size = ocg->CreateInt(ref_size);
-    } else {
-      if (dim1) {
-        size = ocg->CreateTimes(
-          new CG_roseRepr(isSgExpression(buildVarRefExp(dim1))),
-          new CG_roseRepr(isSgExpression(buildVarRefExp(dim2))));
-      } else {
-        char buf[1024];
-        sprintf(buf,
-                "CudaizeCodeGen: Array reference %s does not have a "
-                "detectable size or specififed dimentions",
-                name.c_str());
-        throw std::runtime_error(buf);
-      }
-    }
-    v.size_expr =
-      static_cast<CG_roseRepr*>(ocg->CreateTimes(size,
-                                                 new omega::CG_roseRepr(
-                                                   isSgExpression(buildSizeOfOp(v.type)))))->GetExpression();
-    
-    v.in_data = inArray;
-    v.out_data = 0;
-    arrayVars.push_back(v);
-  }
-  
-  if (arrayVars.size() < 2) {
-    fprintf(stderr,
-            "cudaize error: Did not find two arrays being accessed\n");
-    return false;
-  }
+    int numitems = 1;
+    param->print(0, stderr); debug_fprintf(stderr, "\n");
 
-  //protonu--debugging tool--the printf statement
-  //tex_mem_on signals use of tex mem
-  /* derick -- texmapping near malloc mcopy
-  for(int i=0; i<arrayVars.size(); i++)
-  {
-	  //printf("var name %s, tex_mem used %s\n", arrayVars[i].name.c_str(), (arrayVars[i].tex_mapped)?"true":"false");
-	  if (arrayVars[i].tex_mapped  ) tex_mem_on ++;
-	  //if (arrayVars[i].cons_mapped  ) cons_mem_on ++;
-  }
-  */
+
+    if (param->numdimensions < 1 || 
+        param->arraysizes == NULL) { 
+      //Lookup in array_dims (the cudaize call has this info for some variables?) 
+      std::map<std::string, int>::iterator it = array_dims.find(name.c_str());
+      //debug_fprintf(stderr, "it %s %d\n", (*it).first.c_str(), (*it).second);  
+      debug_fprintf(stderr, "LUA command says this variable %s should be size %d\n",  (*it).first.c_str(), (*it).second); 
+      numitems = (*it).second; 
+
+    }
+    else { 
+      debug_fprintf(stderr, "numdimensions = %d\n", param->numdimensions);
+      for (int i=0; i<param->numdimensions; i++) { 
+        numitems *= param->arraysizes[i]; 
+      }
+    } 
+
+
+
+
+    chillAST_IntegerLiteral *numthings = new chillAST_IntegerLiteral( numitems ); 
+    
+    debug_fprintf(stderr, "creating int mult size expression numitems %d x sizeof( %s )\n", numitems, v.type ); 
+    
+    // create a mult  
+    v.size_expr = new chillAST_BinaryOperator( numthings, "*", so, NULL); // 1024 * sizeof(float)  etc
+    
+    v.CPUside_param = param;
+    v.in_data = param;
+    v.out_data = 0;
+    
+    
+    debug_fprintf(stderr, "loop_cuda_rose.ccc L1636 adding input v to arrayVars\n\n"); 
+    v.print(); 
+    arrayVars.push_back(v);   
+  } // end of READ refs
   
+  
+  debug_fprintf(stderr, "\n\nAdd our mallocs (and input array memcpys) %d arrayVars\n", arrayVars.size());
   //Add our mallocs (and input array memcpys)
   for (int i = 0; i < arrayVars.size(); i++) {
-    if(arrayVars[i].cons_mapped) {
-      setupConstantVar(constant_mem, &arrayVars[i], globals, i, symtab);
-      SgStatementPtrList *tnl = new SgStatementPtrList;
-      cudaBindConstantVar(constant_mem, &arrayVars[i], globals, tnl);
-      setup_code = ocg->StmtListAppend(setup_code, new CG_roseRepr(tnl));
-    } 
-    else {
-      SgVariableDeclaration* defn = buildVariableDeclaration(
-        SgName(arrayVars[i].name.c_str()),
-        buildPointerType(arrayVars[i].type));
-      SgInitializedNamePtrList& variables = defn->get_variables();
-      SgInitializedNamePtrList::const_iterator j = variables.begin();
-      SgInitializedName* initializedName = *j;
-      SgVariableSymbol* dvs = new SgVariableSymbol(initializedName);
-      prependStatement(defn, func_body);
-      
-      dvs->set_parent(body_symtab);
-      body_symtab->insert(SgName(arrayVars[i].name.c_str()), dvs);
-    
-//    SgVariableSymbol* dvs = body_symtab->find_variable(SgName(arrayVars[i].name.c_str()));
-    
-    //  if(dvs == NULL)
-    //      dvs =  parameter_symtab->find_variable(SgName(arrayVars[i].name.c_str()));
-    
-    //cudaMalloc args
-    // SgBasicBlock* block = buildBasicBlock();
-      SgName name_cuda_malloc("cudaMalloc");
-      SgFunctionDeclaration * decl_cuda_malloc =
-        buildNondefiningFunctionDeclaration(name_cuda_malloc,
-                                            buildVoidType(), buildFunctionParameterList(), globals);
-      
-      SgName name_cuda_copy("cudaMemcpy");
-      SgFunctionDeclaration * decl_cuda_copy =
-        buildNondefiningFunctionDeclaration(name_cuda_copy,
-                                            buildVoidType(), buildFunctionParameterList(), globals);
-      
-      SgExprListExp* args = buildExprListExp();
-      args->append_expression(
-        buildCastExp(buildAddressOfOp(buildVarRefExp(dvs)),
-                     buildPointerType(buildPointerType(buildVoidType()))));
-      args->append_expression(arrayVars[i].size_expr);
-    
-//    decl_cuda_malloc->get_parameterList()->append_arg
-      SgFunctionCallExp *the_call = buildFunctionCallExp(
-        buildFunctionRefExp(decl_cuda_malloc), args);
-      
-      SgExprStatement* stmt = buildExprStatement(the_call);
-    
-    //  (*replacement_list).push_back (stmt);
-    
-      SgStatementPtrList* tnl = new SgStatementPtrList;
-      (*tnl).push_back(stmt);
-      setup_code = ocg->StmtListAppend(setup_code, new CG_roseRepr(tnl));
-      if (arrayVars[i].in_data) {
-      
-        SgExprListExp * cuda_copy_in_args = buildExprListExp();
-        cuda_copy_in_args->append_expression(
-          isSgExpression(buildVarRefExp(dvs)));
-        cuda_copy_in_args->append_expression(
-          isSgExpression(buildVarRefExp(arrayVars[i].in_data)));
-        CG_roseRepr* size_exp = new CG_roseRepr(arrayVars[i].size_expr);
-        cuda_copy_in_args->append_expression(
-          static_cast<CG_roseRepr*>(size_exp->clone())->GetExpression());
-        cuda_copy_in_args->append_expression(
-          buildOpaqueVarRefExp("cudaMemcpyHostToDevice", globals));
-      
-//                                      cuda_copy_in_args->append_expression(
-//                                              new SgVarRefExp(sourceLocation, )
-//                                      );
-        SgFunctionCallExp * cuda_copy_in_func_call = buildFunctionCallExp(
-          buildFunctionRefExp(decl_cuda_copy), cuda_copy_in_args);
-      
-        SgExprStatement* stmt = buildExprStatement(cuda_copy_in_func_call);
-      
-        SgStatementPtrList *tnl = new SgStatementPtrList;
-        (*tnl).push_back(stmt);
-        setup_code = ocg->StmtListAppend(setup_code, new CG_roseRepr(tnl));
-      
-        if(arrayVars[i].tex_mapped) {
-          setupTexmappingVar(texture, &arrayVars[i], globals, i, dvs, symtab);
-          SgStatementPtrList *tnl = new SgStatementPtrList;
-          cudaBindTexture(texture, &arrayVars[i], globals, tnl);
-          setup_code = ocg->StmtListAppend(setup_code, new CG_roseRepr(tnl));
-        }
-      }
+
+    //debug_fprintf(stderr, "0x%x\n", arrayVars[i].vardecl); 
+    debug_fprintf(stderr, "arrayVar %d\nC side: %s    Kernel side %s\n", i, arrayVars[i].name.c_str(), arrayVars[i].original_name.c_str() ); 
+
+
+    const char *kernelparamname = arrayVars[i].original_name.c_str(); 
+    int pdsymoffset = -1;
+    for (int j=0;j<parameterSymbols.size(); j++) { 
+      if (!(strcmp( kernelparamname, parameterSymbols[j]->varname))) pdsymoffset = j;
     }
-  }
-  
-  //Build dimGrid dim3 variables based on loop dimentions and ti/tj
+    if ( pdsymoffset == -1 ) { 
+      // complain 
+    }
+    else { 
+      // we will not know all array sizes for the kernel definition(??)
+      chillAST_VarDecl *param =  (chillAST_VarDecl *)parameterSymbols[pdsymoffset]->clone(); 
+      param->knownArraySizes = false; // ?? 
+      
+      //debug_fprintf(stderr, "adding %s to GPUKernel parameters\n", kernelparamname);
+      GPUKernel->addParameter( param );
+      
+    }
+
+    if(arrayVars[i].cons_mapped) {
+      debug_fprintf(stderr, "arrayVar %d is cons mapped  (TODO) \n", i); 
+      exit(-1); 
+    }
+    else { 
+      debug_fprintf(stderr, "buildVariableDeclaration %s\n", arrayVars[i].name.c_str()); 
+      // create a CHILL variable declaration and put it in the CPU side function
+
+      char typ[128];
+      sprintf(typ, "%s *", arrayVars[i].type); 
+
+      chillAST_VarDecl *var = new chillAST_VarDecl( typ,
+                                                    arrayVars[i].name.c_str(),
+                                                    "", // TODO
+                                                    NULL);
+      // set the array info to match
+      // store variable decl where we can get it easilly later
+      arrayVars[i].vardecl = var;
+
+      CPUfuncbody->insertChild(0, var );  // add the CPUside variable declaration 
+
+      // do the CPU side cudaMalloc 
+      chillAST_DeclRefExpr *DRE = new chillAST_DeclRefExpr( var, CPUfuncbody ); 
+      chillAST_CStyleAddressOf *AO = new chillAST_CStyleAddressOf( DRE );
+      chillAST_CStyleCastExpr *casttovoidptrptr = new chillAST_CStyleCastExpr( "void **", AO, NULL ); 
+      chillAST_CudaMalloc *cmalloc = new chillAST_CudaMalloc( casttovoidptrptr, arrayVars[i].size_expr, NULL); 
+      CPUfuncbody->addChild( cmalloc );
+
+      debug_fprintf(stderr, "\ncudamalloc is:\n"); 
+      cmalloc->print(); printf("\n"); fflush(stdout); 
+      
+      debug_fprintf(stderr, "\nnow the memcpy (for input variables only????)\n"); 
+      if (arrayVars[i].in_data) {  // if it's input to the calculation, and we need to copy the data to the GPU
+        //debug_fprintf(stderr, "it's an input to the calculation, so we need to copy the data to the GPU\n"); 
+        
+        // do the CPU side cudaMemcpy, CPU to GPU("device")
+        //DRE = new chillAST_DeclRefExpr( var, CPUfuncbody ); 
+        chillAST_CudaMemcpy *cmemcpy = new chillAST_CudaMemcpy( var, 
+                                                                (chillAST_VarDecl*)(arrayVars[i].in_data), 
+                                                                arrayVars[i].size_expr, "cudaMemcpyHostToDevice"); 
+        CPUfuncbody->addChild( cmemcpy );
+        
+        //printf("\n"); cmemcpy->print(); printf("\n");fflush(stdout); 
+      } // for input variables only (must be copied to GPU before the kernel call) 
+      //else { 
+      //  debug_fprintf(stderr, "it's not an input to the calculation, so no memcpy over to the GPU\n"); 
+      //} 
+    }  // not cons mapped 
+  }   // for all arrayvars 
+
+
+  debug_fprintf(stderr, "\nBuild dimGrid dim3 variables based on loop dimensions and ti/tj\n"); 
+  //Build dimGrid dim3 variables based on loop dimensions and ti/tj
   char blockD1[120];
   char blockD2[120];
+  int dim1 = 0;            // TODO 
   if (dim1) {
-    snprintf(blockD1, 120, "%s/%d",
+     debug_fprintf(stderr,"cu_tx, cu_ty    CASE NOT HANDLED\n"); 
+     exit(-1); 
+#ifdef NOTYET
+   snprintf(blockD1, 120, "%s/%d",
              dim1->get_declaration()->get_name().getString().c_str(), cu_tx);
     snprintf(blockD2, 120, "%s/%d",
              dim2->get_declaration()->get_name().getString().c_str(), cu_ty);
+#endif
   } else {
+    debug_fprintf(stderr,"cu_bx, cu_by\n"); 
     snprintf(blockD1, 120, "%d", cu_bx);
     snprintf(blockD2, 120, "%d", cu_by);
     //snprintf(blockD1, 120, "%d/%d", cu_nx, cu_tx);
     //snprintf(blockD2, 120, "%d/%d", cu_ny, cu_ty);
   }
+  debug_fprintf(stderr, "blockD1 '%s'\n", blockD1); 
+  debug_fprintf(stderr, "blockD2 '%s'\n", blockD2); 
   
-  SgInitializedName* arg1 = buildInitializedName("i", buildIntType());
-  SgInitializedName* arg2 = buildInitializedName("j", buildIntType());
-  SgInitializedName* arg3 = buildInitializedName("k", buildIntType());
-  SgName type_name("dim3");
-  //SgClassSymbol * type_symbol = globalScope->lookup_class_symbol(type_name);
-  
-  //ROSE_ASSERT(type_symbol != NULL);
-  
-  //SgClassDeclaration * dim3classdecl = isSgClassDeclaration(
-  //        type_symbol->get_declaration());
-  
-  SgFunctionDeclaration * funcdecl = buildNondefiningFunctionDeclaration(
-    SgName("dim3"), buildOpaqueType("dim3", globalScope),
-    //isSgType(dim3classdecl->get_type()),
-    buildFunctionParameterList(arg1, arg2, arg3), globalScope);
-  
-  if (cu_bx && cu_by)
-    repr = ocg->CreateDim3((const char*) gridName, ocg->CreateInt(cu_bx),
-                           ocg->CreateInt(cu_by));
-  else if (cu_bx_repr && cu_by_repr)
-    repr = ocg->CreateDim3((const char*) gridName, cu_bx_repr, cu_by_repr);
-  else if (cu_bx_repr)
-    repr = ocg->CreateDim3((const char*) gridName, cu_bx_repr,
-                           ocg->CreateInt(1));
-  setup_code = ocg->StmtListAppend(setup_code, repr);
-  //SgStatementPtrList* dimList = static_cast<CG_roseRepr *>(repr)->GetList();
-  
-  //for(SgStatementPtrList::iterator it = (*dimList).begin(); it != (*dimList).end(); it++)
-  //    (*replacement_list).push_back (*it);
-  
-  //  repr = ocg->CreateDim3((const char*)blockName, cu_tx,cu_ty);
-  
-  if (cu_tz > 1 || cu_tz_repr) {
+  chillAST_FunctionDecl *dimbuiltin = new chillAST_FunctionDecl( "dim3", "dim3" );
+  dimbuiltin->setBuiltin();
+
+  chillAST_CallExpr *CE1 = new chillAST_CallExpr( dimbuiltin, NULL );
+
+  // create ARGS ro dim3. 
+  debug_fprintf(stderr, "create ARGS to dim3\n"); 
+  if (cu_bx && cu_by) {                                      // 2 constants
+    debug_fprintf(stderr, "dim3 dimGrid %d %d\n", cu_bx, cu_by); 
+    CE1->addArg( new chillAST_IntegerLiteral( cu_bx ));
+    CE1->addArg( new chillAST_IntegerLiteral( cu_by ));
+  }
+  else if (cu_bx_repr && cu_by_repr) {                        // 2 expressions? 
+    debug_fprintf(stderr, "dim3 dimGrid cu_bx_repr  cu_by_repr\n" ); 
+    chillAST_node *code1  = cu_bx_repr-> GetCode();
+    chillAST_node *code2  = cu_bx_repr-> GetCode();
+    CE1->addArg( code1 ); 
+    CE1->addArg( code2 ); 
+  }
+  else if (cu_bx_repr) {
+    debug_fprintf(stderr, "dim3 dimGrid  cu_bx_repr 1\n");            // one expression, and a constant?
+    cu_bx_repr->dump(); fflush(stdout); 
+    chillAST_node *code  = cu_bx_repr-> GetCode();
     
-    if (cu_tx && cu_ty && cu_tz)
-      repr = ocg->CreateDim3((char*) blockName, ocg->CreateInt(cu_tx),
-                             ocg->CreateInt(cu_ty), ocg->CreateInt(cu_tz));
-    else if (cu_tx_repr && cu_ty_repr && cu_tz_repr)
-      repr = ocg->CreateDim3((char*) blockName, cu_tx_repr, cu_ty_repr,
-                             cu_tz_repr);
-    // SgStatementPtrList* dimList = static_cast<CG_roseRepr *>(repr)->GetList();
+    CE1->addArg( code ); 
+    CE1->addArg( new chillAST_IntegerLiteral( cu_by ));
+
+  }
+
+  chillAST_VarDecl *dimgriddecl = new chillAST_VarDecl( "dim3", "dimGrid", "", NULL );
+  dimgriddecl->setInit(CE1);
+  CPUfuncbody->addChild( dimgriddecl ); 
+  debug_fprintf(stderr, "appending DIMGRID repr to setup code\n\n");
+
+
+  debug_fprintf(stderr, "\nDIMBLOCK\n"); 
+  // DIMBLOCK 
+  int bs1 = 32;
+  int bs2 = 1;
+  if (cu_tz > 1) { //  || cu_tz_repr) {
+    debug_fprintf(stderr, "cu_tz\n"); 
+    exit(-1); 
     
-    // for(SgStatementPtrList::iterator it = (*dimList).begin(); it != (*dimList).end(); it++)
-    //    (*replacement_list).push_back (*it);
-    
-  } else {
-    if (cu_tx && cu_ty)
-      repr = ocg->CreateDim3((char*) blockName, ocg->CreateInt(cu_tx),
-                             ocg->CreateInt(cu_ty));
-    else if (cu_tx_repr && cu_ty_repr)
-      repr = ocg->CreateDim3((char*) blockName, cu_tx_repr, cu_ty_repr);
-    //SgStatementPtrList* dimList = static_cast<CG_roseRepr *>(repr)->GetList();
-    
-    //for(SgStatementPtrList::iterator it = (*dimList).begin(); it != (*dimList).end(); it++)
-    //   (*replacement_list).push_back (*it);
+  }
+  else { 
+    debug_fprintf(stderr, "NOT cu_tz\n"); 
+    if (cu_tx && cu_ty) { 
+      debug_fprintf(stderr, "cu_tx && cu_ty\n"); 
+      bs1 = cu_tx;
+      bs2 = cu_ty; 
+    }
+    else if (cu_tx_repr && cu_ty_repr) { 
+      debug_fprintf(stderr, "cu_tx && cu_ty REPR\n"); 
+      exit(-1); 
+    }
     
   }
   
-  setup_code = ocg->StmtListAppend(setup_code, repr);
+
+
+  chillAST_CallExpr *CE2 = new chillAST_CallExpr( dimbuiltin, NULL );
+  CE2->addArg( new chillAST_IntegerLiteral( bs1 ));
+  CE2->addArg( new chillAST_IntegerLiteral( bs2 ));
+  chillAST_VarDecl *dimblockdecl = new chillAST_VarDecl( "dim3", "dimBlock", "", NULL );
+  dimblockdecl->setInit(CE2);
   
-  SgCudaKernelExecConfig* config = new SgCudaKernelExecConfig(
-    buildVarRefExp(gridName), buildVarRefExp(blockName), NULL, NULL);
-  //SgCudaKernelExecConfig* config = new SgCudaKernelExecConfig(buildIntVal(cu_bx), , NULL, NULL);
-  SgExprListExp* iml = new SgExprListExp();
-  SgCastExp* dim_s;
-  
-  //Creating Kernel function
-  SgBasicBlock* bb = new SgBasicBlock(TRANSFORMATION_FILE_INFO);
-  SgFunctionDefinition* kernel_defn = new SgFunctionDefinition(
-    TRANSFORMATION_FILE_INFO, bb);
-  SgFunctionDeclaration* kernel_decl_ = new SgFunctionDeclaration(
-    TRANSFORMATION_FILE_INFO, SgName((char*)cu_kernel_name.c_str()),buildFunctionType(buildVoidType(), buildFunctionParameterList()), kernel_defn);
-  SgFunctionDeclaration* kernel_decl = new SgFunctionDeclaration(
-    TRANSFORMATION_FILE_INFO, SgName((char*)cu_kernel_name.c_str()),buildFunctionType(buildVoidType(), buildFunctionParameterList()), kernel_defn);
-  
-  //((kernel_decl->get_declarationModifier()).get_storageModifier()).setStatic();
-  
-  kernel_decl->set_definingDeclaration(kernel_decl);
-  kernel_defn->set_parent(kernel_decl);
-  bb->set_parent(kernel_defn);
-  bb->set_endOfConstruct(TRANSFORMATION_FILE_INFO);
-  bb->get_endOfConstruct()->set_parent(bb);
-  
-  //SgFunctionSymbol* functionSymbol = new SgFunctionSymbol(kernel_decl_);
-  //globals->insert_symbol(SgName((char*) cu_kernel_name.c_str()),
-  //            functionSymbol);
-  SgFunctionSymbol* functionSymbol2 = new SgFunctionSymbol(kernel_decl);
-  
-  globals->insert_symbol(SgName((char*) cu_kernel_name.c_str()),
-                         functionSymbol2);
-  
-  kernel_decl_->set_parent(globals);
-  
-  kernel_decl_->set_scope(globals);
-  
-  kernel_decl_->setForward();
-  
-  globals->prepend_declaration(kernel_decl_);
-  
-  kernel_decl->set_endOfConstruct(TRANSFORMATION_FILE_INFO);
-  kernel_decl->get_endOfConstruct()->set_parent(kernel_decl);
-  
-  kernel_decl->set_parent(globals);
-  kernel_decl->set_scope(globals);
-  
-  kernel_decl->get_definition()->set_endOfConstruct(TRANSFORMATION_FILE_INFO);
-  kernel_decl->get_definition()->get_endOfConstruct()->set_parent(
-    kernel_decl->get_definition());
-  
-  globals->append_statement(kernel_decl);
-  
-  //printf("%s %s\n", static_cast<const char*>(cu_kernel_name), dims);
-  //--derick - kernel function parameters  
-  for (int i = 0; i < arrayVars.size(); i++)
+  CPUfuncbody->addChild( dimblockdecl ); 
+
+
+  // kernel call 
+  debug_fprintf(stderr, "KERNEL CALL\n"); 
+  chillAST_CallExpr *kcall = new chillAST_CallExpr( GPUKernel,  CPUfuncbody);
+  kcall->grid = dimgriddecl; 
+    kcall->block =  dimblockdecl; 
+  debug_fprintf(stderr, "kernel function parameters\n"); 
+  for (int i = 0; i < arrayVars.size(); i++) { 
     //Throw in a type cast if our kernel takes 2D array notation
     //like (float(*) [1024])
-  {
-    //protonu--throwing in another hack to stop the caller from passing tex mapped
-    //vars to the kernel.
-    if (arrayVars[i].tex_mapped == true || arrayVars[i].cons_mapped)
-      continue;
-    if (!(arrayVars[i].size_multi_dim.empty())) {
-      //snprintf(dims,120,"(float(*) [%d])%s", arrayVars[i].size_2d,
-      //         const_cast<char*>(arrayVars[i].name.c_str()));
-      
-      SgType* t = arrayVars[i].type;
-      for (int k = arrayVars[i].size_multi_dim.size() - 1; k >= 0; k--) {
-        t = buildArrayType(t,
-                           buildIntVal(arrayVars[i].size_multi_dim[k]));
+    
+    if (arrayVars[i].tex_mapped || arrayVars[i].cons_mapped) continue;
+
+    chillAST_VarDecl *v = arrayVars[i].vardecl;
+    chillAST_VarDecl *param = arrayVars[i].CPUside_param;
+
+    //debug_fprintf(stderr, "numdimensions %d\n", param->numdimensions); 
+    
+    if (param->numdimensions > 1) { 
+      debug_fprintf(stderr, "array Var %d %s is multidimensional\n",i, v->varname);
+      //debug_fprintf(stderr, "underlying type %s\narraypart %s\n", v->underlyingtype, v->arraypart); 
+      char line[128];
+      sprintf(line, "%s (*)", v->underlyingtype ); 
+      //debug_fprintf(stderr, "line '%s'\n", line);
+      // we'll pass in a cast of the variable instead of just the variable.
+      for (int i=1; i<param->numdimensions; i++) { 
+        int l = strlen(line);
+        //debug_fprintf(stderr, "l %d\n", l); 
+        char *ptr = &line[l];
+        //debug_fprintf(stderr, "[%d]", param->arraysizes[i]); 
+        sprintf(ptr, "[%d]", param->arraysizes[i]); 
+        //debug_fprintf(stderr, "i %d line '%s'\n", i, line);
+        chillAST_CStyleCastExpr *CE = new chillAST_CStyleCastExpr( line, v, NULL );
+        kcall->addArg( CE );
       }
-      SgVariableSymbol* temp = body_symtab->find_variable(
-        SgName((char*) arrayVars[i].name.c_str()));
-      if (temp == NULL)
-        temp = parameter_symtab->find_variable(
-          SgName((char*) arrayVars[i].name.c_str()));
-      
-      dim_s = buildCastExp(buildVarRefExp(temp), buildPointerType(t),
-                           SgCastExp::e_C_style_cast);
-      
-      //printf("%d %s\n", i, dims);
-      iml->append_expression(dim_s);
-      
-      SgInitializedName* id = buildInitializedName(
-        (char*) arrayVars[i].original_name.c_str(),
-        buildPointerType(t));
-      kernel_decl->get_parameterList()->append_arg(id);
-      kernel_decl_->get_parameterList()->append_arg(id);
-      id->set_file_info(TRANSFORMATION_FILE_INFO);
-      
-      // DQ (9/8/2007): We now test this, so it has to be set explicitly.
-      id->set_scope(kernel_decl->get_definition());
-      
-      // DQ (9/8/2007): Need to add variable symbol to global scope!
-      //printf ("Fixing up the symbol table in scope = %p = %s for SgInitializedName = %p = %s \n",globalScope,globalScope->class_name().c_str(),var1_init_name,var1_init_name->get_name().str());
-      SgVariableSymbol *var_symbol = new SgVariableSymbol(id);
-      kernel_decl->get_definition()->insert_symbol(id->get_name(),
-                                                   var_symbol);
-      
-      // if(kernel_decl->get_definition()->get_symbol_table()->find((const) id) == NULL)
-      
-    } else {
-      //printf("%d %s\n", i, static_cast<const char*>(arrayVars[i].name));
-      SgVariableSymbol* temp = body_symtab->find_variable(
-        SgName((char*) arrayVars[i].name.c_str()));
-      if (temp == NULL)
-        temp = parameter_symtab->find_variable(
-          SgName((char*) arrayVars[i].name.c_str()));
-      iml->append_expression(buildVarRefExp(temp));
-      SgInitializedName* id = buildInitializedName(
-        (char*) arrayVars[i].original_name.c_str(),
-        buildPointerType(arrayVars[i].type));
-      kernel_decl->get_parameterList()->append_arg(id);
-      kernel_decl_->get_parameterList()->append_arg(id);
-      id->set_file_info(TRANSFORMATION_FILE_INFO);
-      
-      // DQ (9/8/2007): We now test this, so it has to be set explicitly.
-      id->set_scope(kernel_decl->get_definition());
-      
-      // DQ (9/8/2007): Need to add variable symbol to global scope!
-      //printf ("Fixing up the symbol table in scope = %p = %s for SgInitializedName = %p = %s \n"$
-      SgVariableSymbol *var_symbol = new SgVariableSymbol(id);
-      kernel_decl->get_definition()->insert_symbol(id->get_name(),
-                                                   var_symbol);
+      //int l = strlen(line);
+      //char *ptr = line + l;
+      //sprintf(ptr, ")");
+      //debug_fprintf(stderr, "line '%s'\n", line); 
       
     }
-    
-  }
-  if (dim1) {
-    iml->append_expression(buildVarRefExp(dim1));
-    SgInitializedName* id = buildInitializedName(
-      dim1->get_name().getString().c_str(), dim1->get_type());
-    kernel_decl->get_parameterList()->append_arg(id);
-    
-    iml->append_expression(buildVarRefExp(dim2));
-    SgInitializedName* id2 = buildInitializedName(
-      dim2->get_name().getString().c_str(), dim2->get_type());
-    
-    kernel_decl->get_parameterList()->append_arg(id);
-    kernel_decl_->get_parameterList()->append_arg(id);
-  }
-  
-  kernel_decl->get_functionModifier().setCudaKernel();
-  kernel_decl_->get_functionModifier().setCudaKernel();
-  SgCudaKernelCallExp * cuda_call_site = new SgCudaKernelCallExp(
-    TRANSFORMATION_FILE_INFO, buildFunctionRefExp(kernel_decl), iml,config);
-  
-  //  SgStatementPtrList *tnl2 = new SgStatementPtrList;
-  
-  (*replacement_list).push_back(buildExprStatement(cuda_call_site));
-  
-  setup_code = ocg->StmtListAppend(setup_code,
-                                   new CG_roseRepr(replacement_list));
-  
-  //cuda free variables
-  for (int i = 0; i < arrayVars.size(); i++) {
-    if (arrayVars[i].out_data) {
-      
-      SgName name_cuda_copy("cudaMemcpy");
-      SgFunctionDeclaration * decl_cuda_copyout =
-        buildNondefiningFunctionDeclaration(name_cuda_copy,
-                                            buildVoidType(), buildFunctionParameterList(),
-                                            globals);
-      
-      SgExprListExp* args = buildExprListExp();
-      SgExprListExp * cuda_copy_out_args = buildExprListExp();
-      cuda_copy_out_args->append_expression(
-        isSgExpression(buildVarRefExp(arrayVars[i].out_data)));
-      cuda_copy_out_args->append_expression(
-        isSgExpression(buildVarRefExp(arrayVars[i].name)));
-      CG_roseRepr* size_exp = new CG_roseRepr(arrayVars[i].size_expr);
-      cuda_copy_out_args->append_expression(
-        static_cast<CG_roseRepr*>(size_exp->clone())->GetExpression());
-      cuda_copy_out_args->append_expression(
-        buildOpaqueVarRefExp("cudaMemcpyDeviceToHost", globals));
-      
-//                                      cuda_copy_in_args->append_expression(
-//                                              new SgVarRefExp(sourceLocation, )
-//                                      );
-      SgFunctionCallExp * cuda_copy_out_func_call = buildFunctionCallExp(
-        buildFunctionRefExp(decl_cuda_copyout), cuda_copy_out_args);
-      
-      SgFunctionCallExp *the_call = buildFunctionCallExp(
-        buildFunctionRefExp(decl_cuda_copyout), cuda_copy_out_args);
-      
-      SgExprStatement* stmt = buildExprStatement(the_call);
-      
-      SgStatementPtrList* tnl3 = new SgStatementPtrList;
-      
-      (*tnl3).push_back(stmt);
-      
-      //   tree_node_list* tnl = new tree_node_list;
-      //   tnl->append(new tree_instr(the_call));
-      setup_code = ocg->StmtListAppend(setup_code, new CG_roseRepr(tnl3));
-      
-    }
-    if(!arrayVars[i].cons_mapped) {
-      SgName name_cuda_free("cudaFree");
-      SgFunctionDeclaration * decl_cuda_free =
-        buildNondefiningFunctionDeclaration(name_cuda_free,
-                                            buildVoidType(), buildFunctionParameterList(), globals);
-      
-      SgExprListExp* args3 = buildExprListExp();
-      
-      SgVariableSymbol* tmp = body_symtab->find_variable(
-        SgName(arrayVars[i].name.c_str()));
-      if (tmp == NULL)
-        tmp = parameter_symtab->find_variable(
-          SgName(arrayVars[i].name.c_str()));
-      
-      args3->append_expression(buildVarRefExp(tmp));
-      
-      SgFunctionCallExp *the_call2 = buildFunctionCallExp(
-        buildFunctionRefExp(decl_cuda_free), args3);
-      
-      SgExprStatement* stmt2 = buildExprStatement(the_call2);
-      
-      SgStatementPtrList* tnl4 = new SgStatementPtrList;
-      
-      (*tnl4).push_back(stmt2);
-      //(*replacement_list).push_back (stmt2);
-    
-      setup_code = ocg->StmtListAppend(setup_code, new CG_roseRepr(tnl4));
-    }
-  }
-  
-  // ---------------
-  // BUILD THE KERNEL
-  // ---------------
-  
-  //Extract out kernel body
-  SgNode* code = getCode();
-  //Create kernel function body
-  //Add Params
-  std::map<std::string, SgVariableSymbol*> loop_vars;
-  //In-Out arrays
-  for (int i = 0; i < arrayVars.size(); i++) {
-    /*   if(arrayVars[i].in_data)
-         fptr = arrayVars[i].in_data->type()->clone();
-         else
-         fptr = arrayVars[i].out_data->type()->clone();
-    */
-    
-    // fptr = new_proc_syms->install_type(fptr);
-    std::string name =
-      arrayVars[i].in_data ?
-      arrayVars[i].in_data->get_declaration()->get_name().getString() :
-      arrayVars[i].out_data->get_declaration()->get_name().getString();
-    //SgVariableSymbol* sym = new var_sym(fptr, arrayVars[i].in_data ? arrayVars[i].in_data->name() : arrayVars[i].out_data->name());
-    
-    SgVariableSymbol* sym =
-      kernel_decl->get_definition()->get_symbol_table()->find_variable(
-        (const char*) name.c_str());
-    /* SgVariableDeclaration*  defn = buildVariableDeclaration(SgName(name.c_str()), buildFloatType());
-       SgInitializedNamePtrList& variables = defn->get_variables();
-       SgInitializedNamePtrList::const_iterator i = variables.begin();
-       SgInitializedName* initializedName = *i;
-       SgVariableSymbol* sym = new SgVariableSymbol(initializedName);
-       prependStatement(defn, isSgScopeStatement(root_));
-       
-       vs->set_parent(symtab2_);
-       symtab2_->insert(SgName(_s.c_str()), vs);
-    */
-    
-    if (sym != NULL)
-      loop_vars.insert(
-        std::pair<std::string, SgVariableSymbol*>(std::string(name),
-                                                  sym));
-  }
-  
-  //Figure out which loop variables will be our thread and block dimention variables
-  std::vector<SgVariableSymbol *> loop_syms;
-  //Get our indexes
-  std::vector<const char*> indexes; // = get_loop_indexes(code,cu_num_reduce);
-  int threadsPos = 0;
-  
-  CG_outputRepr *body = NULL;
-  SgFunctionDefinition* func_d = func_definition;
-  //std::vector<SgVariableSymbol *> symbols =  recursiveFindRefs(code);
-  
-  SgName name_sync("__syncthreads");
-  SgFunctionDeclaration * decl_sync = buildNondefiningFunctionDeclaration(
-    name_sync, buildVoidType(), buildFunctionParameterList(),
-    globalScope);
-  
-  recursiveFindRefs(code, syms, func_d);
-  
-  //SgFunctionDeclaration* func = Outliner::generateFunction (code, (char*)cu_kernel_name.c_str(), syms, pdSyms, psyms, NULL, globalScope);
-  
-  if (cu_bx > 1 || cu_bx_repr) {
-    indexes.push_back("bx");
-    SgName type_name("blockIdx.x");
-    SgClassSymbol * type_symbol = globalScope->lookup_class_symbol(
-      type_name);
-    SgVariableDeclaration * var_decl = buildVariableDeclaration("bx",
-                                                                buildIntType(), NULL,
-                                                                isSgScopeStatement(kernel_decl->get_definition()->get_body()));
-    SgStatementPtrList *tnl = new SgStatementPtrList;
-    // (*tnl).push_back(isSgStatement(var_decl));
-    appendStatement(var_decl, kernel_decl->get_definition()->get_body());
-    
-    SgVariableSymbol* bx =
-      kernel_decl->get_definition()->get_body()->lookup_variable_symbol(
-        SgName("bx"));
-    SgStatement* assign = isSgStatement(
-      buildAssignStatement(buildVarRefExp(bx),
-                           buildOpaqueVarRefExp("blockIdx.x",
-                                                kernel_decl->get_definition()->get_body())));
-    (*tnl).push_back(assign);
-    // body = ocg->StmtListAppend(body,
-    //                                  new CG_roseRepr(tnl));
-    appendStatement(assign, kernel_decl->get_definition()->get_body());
-    
-  }
-  if (cu_by > 1 || cu_by_repr) {
-    indexes.push_back("by");
-    SgName type_name("blockIdx.y");
-    SgClassSymbol * type_symbol = globalScope->lookup_class_symbol(
-      type_name);
-    SgVariableDeclaration * var_decl = buildVariableDeclaration("by",
-                                                                buildIntType(), NULL,
-                                                                isSgScopeStatement(kernel_decl->get_definition()->get_body()));
-    // SgStatementPtrList *tnl = new SgStatementPtrList;
-    // (*tnl).push_back(isSgStatement(var_decl));
-    appendStatement(var_decl, kernel_decl->get_definition()->get_body());
-    
-    SgVariableSymbol* by =
-      kernel_decl->get_definition()->get_body()->lookup_variable_symbol(
-        SgName("by"));
-    SgStatement* assign = isSgStatement(
-      buildAssignStatement(buildVarRefExp(by),
-                           buildOpaqueVarRefExp("blockIdx.y",
-                                                kernel_decl->get_definition()->get_body())));
-    //(*tnl).push_back(assign);
-    // body = ocg->StmtListAppend(body,
-    //                                  new CG_roseRepr(tnl));
-    appendStatement(assign, kernel_decl->get_definition()->get_body());
-    
-  }
-  if (cu_tx_repr || cu_tx > 1) {
-    threadsPos = indexes.size();
-    indexes.push_back("tx");
-    SgName type_name("threadIdx.x");
-    SgClassSymbol * type_symbol = globalScope->lookup_class_symbol(
-      type_name);
-    SgVariableDeclaration * var_decl = buildVariableDeclaration("tx",
-                                                                buildIntType(), NULL,
-                                                                isSgScopeStatement(kernel_decl->get_definition()->get_body()));
-    //  SgStatementPtrList *tnl = new SgStatementPtrList;
-    //  (*tnl).push_back(isSgStatement(var_decl));
-    appendStatement(var_decl, kernel_decl->get_definition()->get_body());
-    
-    SgVariableSymbol* tx =
-      kernel_decl->get_definition()->get_body()->lookup_variable_symbol(
-        SgName("tx"));
-    SgStatement* assign = isSgStatement(
-      buildAssignStatement(buildVarRefExp(tx),
-                           buildOpaqueVarRefExp("threadIdx.x",
-                                                kernel_decl->get_definition()->get_body())));
-    //(*tnl).push_back(assign);
-    // body = ocg->StmtListAppend(body,
-    //                                  new CG_roseRepr(tnl));
-    appendStatement(assign, kernel_decl->get_definition()->get_body());
-    
-  }
-  if (cu_ty_repr || cu_ty > 1) {
-    indexes.push_back("ty");
-    SgName type_name("threadIdx.y");
-    SgClassSymbol * type_symbol = globalScope->lookup_class_symbol(
-      type_name);
-    SgVariableDeclaration * var_decl = buildVariableDeclaration("ty",
-                                                                buildIntType(), NULL,
-                                                                isSgScopeStatement(kernel_decl->get_definition()->get_body()));
-    appendStatement(var_decl, kernel_decl->get_definition()->get_body());
-    
-    // SgStatementPtrList *tnl = new SgStatementPtrList;
-    // (*tnl).push_back(isSgStatement(var_decl));
-    SgVariableSymbol* ty =
-      kernel_decl->get_definition()->get_body()->lookup_variable_symbol(
-        SgName("ty"));
-    SgStatement* assign = isSgStatement(
-      buildAssignStatement(buildVarRefExp(ty),
-                           buildOpaqueVarRefExp("threadIdx.y",
-                                                kernel_decl->get_definition()->get_body())));
-    // (*tnl).push_back(assign);
-    //  body = ocg->StmtListAppend(body,
-    //                                   new CG_roseRepr(tnl));
-    appendStatement(assign, kernel_decl->get_definition()->get_body());
-    
-  }
-  if (cu_tz_repr || cu_tz > 1) {
-    indexes.push_back("tz");
-    SgName type_name("threadIdx.z");
-    SgClassSymbol * type_symbol = globalScope->lookup_class_symbol(
-      type_name);
-    SgVariableDeclaration * var_decl = buildVariableDeclaration("tz",
-                                                                buildIntType(), NULL,
-                                                                isSgScopeStatement(kernel_decl->get_definition()->get_body()));
-    //   SgStatementPtrList *tnl = new SgStatementPtrList;
-    //   (*tnl).push_back(isSgStatement(var_decl));
-    appendStatement(var_decl, kernel_decl->get_definition()->get_body());
-    
-    SgVariableSymbol* tz =
-      kernel_decl->get_definition()->get_body()->lookup_variable_symbol(
-        "tz");
-    SgStatement* assign = isSgStatement(
-      buildAssignStatement(buildVarRefExp(tz),
-                           buildOpaqueVarRefExp("threadIdx.z",
-                                                kernel_decl->get_definition()->get_body())));
-    //    (*tnl).push_back(assign);
-    //     body = ocg->StmtListAppend(body,
-    //                                      new CG_roseRepr(tnl));
-    appendStatement(assign, kernel_decl->get_definition()->get_body());
-    
-  }
-  
-  std::map<std::string, SgVariableSymbol*> loop_idxs; //map from idx names to their new syms
-  
-  SgNode* swapped_ = swapVarReferences(code, syms,
-                                       kernel_decl->get_definition()->get_symbol_table(),
-                                       kernel_decl->get_definition()->get_body()->get_symbol_table(),
-                                       kernel_decl->get_definition()->get_body());
-  
-  //std::cout << swapped_->unparseToString() << std::endl << std::endl;
-  
-  SgNode *swapped = recursiveFindReplacePreferedIdxs(swapped_,
-                                                     kernel_decl->get_definition()->get_body()->get_symbol_table(),
-                                                     kernel_decl->get_definition()->get_symbol_table(),
-                                                     kernel_decl->get_definition()->get_body(), loop_idxs, globalScope); //in-place swapping
-  //swapped->print();
-  
-  if (!isSgBasicBlock(swapped)) {
-    appendStatement(isSgStatement(swapped),
-                    kernel_decl->get_definition()->get_body());
-    swapped->set_parent(
-      isSgNode(kernel_decl->get_definition()->get_body()));
-  } else {
-    
-    for (SgStatementPtrList::iterator it =
-           isSgBasicBlock(swapped)->get_statements().begin();
-         it != isSgBasicBlock(swapped)->get_statements().end(); it++) {
-      appendStatement(*it, kernel_decl->get_definition()->get_body());
-      (*it)->set_parent(
-        isSgNode(kernel_decl->get_definition()->get_body()));
-      
-    }
-    
-  }
-  
-  for (int i = 0; i < indexes.size(); i++) {
-    std::vector<SgForStatement*> tfs = findCommentedFors(indexes[i],
-                                                         swapped);
-    for (int k = 0; k < tfs.size(); k++) {
-      //printf("replacing %p tfs for index %s\n", tfs[k], indexes[i]);
-      SgNode* newBlock = forReduce(tfs[k], loop_idxs[indexes[i]],
-                                   kernel_decl->get_definition());
-      //newBlock->print();
-      swap_node_for_node_list(tfs[k], newBlock);
-      //printf("AFTER SWAP\n");        newBlock->print();
+    else { 
+      debug_fprintf(stderr, "array Var %d %s is NOT multidimensional\n",i, v->varname);
+
+      // we just need a decl ref expr inserted as the parameter/argument
+      // when it prints, it will print just the array name
+      chillAST_DeclRefExpr *DRE = new chillAST_DeclRefExpr( v, NULL);
+      kcall->addArg( DRE );
     }
   }
 
-  //--derick replace array refs of texture mapped vars here
-  body = new CG_roseRepr(kernel_decl->get_definition()->get_body());
-  std::vector<IR_ArrayRef*> refs = ir->FindArrayRef(body);
-  texmapArrayRefs(texture, &refs, globals, ir, ocg);
-  // do the same for constant mapped vars
-  consmapArrayRefs(constant_mem, &refs, globals, ir, ocg);
+
+   CPUfuncbody->addChild( kcall );           
+  //kcall->addArg( 
+
+
+
+  debug_fprintf(stderr, "\nfreeing Cuda variables\n"); 
+  //cuda free variables
+  for (int i = 0; i < arrayVars.size(); i++) {
+    debug_fprintf(stderr, "arrayVar %d\n", i); 
+
+    // Memcopy back if we have an output 
+    if (arrayVars[i].out_data) {
+
+      chillAST_DeclRefExpr *DRE = new chillAST_DeclRefExpr( arrayVars[i].vardecl, CPUfuncbody ); 
+      chillAST_CudaMemcpy *cmemcpy = new chillAST_CudaMemcpy( (chillAST_VarDecl*)arrayVars[i].out_data, // wrong info
+                                                              arrayVars[i].vardecl, 
+                                                              arrayVars[i].size_expr, "cudaMemcpyDeviceToHost"); 
+      CPUfuncbody->addChild( cmemcpy );
+    }
+
+    // CudaFree the variable
+    chillAST_DeclRefExpr *DRE = new chillAST_DeclRefExpr( arrayVars[i].vardecl, CPUfuncbody ); 
+    chillAST_CudaFree *cfree = new chillAST_CudaFree( arrayVars[i].vardecl, CPUfuncbody ); 
+    CPUfuncbody->addChild( cfree );
+    
+  }
+  //CPUsidefunc->print(); fflush(stdout); 
+  //GPUKernel->print();   fflush(stdout); 
+
+
+
+
+  debug_fprintf(stderr, "BUILD THE KERNEL\n"); 
+
+  //Extract out kernel loop  (somewhat misnamed. This is NOT the body of the GPUKernel YET) 
+  chillAST_node *kernelloop = getCode(  ); 
+  debug_fprintf(stderr, "loop_cuda_rose.cc L1669 returned from getCode()\n");
+
+  //debug_fprintf(stderr, "loop_cuda_chill.cc L1685  kernelloop =\n");
+  //GPUKernel->getBody()->print(); fflush(stdout);
+  //debug_fprintf(stderr, "\n\n"); 
+         
+  debug_fprintf(stderr, "loop_cuda_rose.cc L1685   kernelloop = \n");
+  kernelloop->print(); 
+  debug_fprintf(stderr, "\n\n"); 
+
+  debug_fprintf(stderr, "%d arrayvars\n", arrayVars.size());  
   
-  return swapped;
+  // this should just be sitting in a member of arrayVars
+  std::map<std::string, chillAST_VarDecl*> loop_vars;
+  for (int i = 0; i < arrayVars.size(); i++) {
+    debug_fprintf(stderr, "arrayVars[%d]  name %s\n", i, arrayVars[i].original_name.c_str()); 
+    //if (arrayVars[i].in_data)  debug_fprintf(stderr, "input ");
+    //if (arrayVars[i].out_data)  debug_fprintf(stderr, "output ");
+    //debug_fprintf(stderr, "\n");
+
+    chillAST_VarDecl *d = GPUKernel->hasParameterNamed( arrayVars[i].original_name.c_str() ); 
+    if (d) { 
+      debug_fprintf(stderr, "inserting %s into loop_vars\n", arrayVars[i].original_name.c_str()); 
+      loop_vars.insert(std::pair<std::string, chillAST_VarDecl*>(std::string(arrayVars[i].original_name), d));
+    }
+  }
+  
+  debug_fprintf(stderr, "\nfind variables used in the kernel (?)\n"); 
+
+  // find all variables used in the function
+  vector<chillAST_VarDecl*> decls;
+  kernelloop->gatherVarDecls( decls );
+  debug_fprintf(stderr, "%d variables in kernel\n", decls.size()); 
+  for (int i=0; i<decls.size(); i++) { 
+    debug_fprintf(stderr, "%s\n", decls[i]->varname); 
+  }
+
+  int nump = GPUKernel->parameters.size();
+  debug_fprintf(stderr, "\n%d parameters to GPUKernel\n", nump); 
+  for (int i=0; i<nump; i++) debug_fprintf(stderr, "parameter %s\n",  GPUKernel->parameters[i]->varname );
+  debug_fprintf(stderr, "\n"); 
+
+  
+
+  //Figure out which loop variables will be our thread and block dimension variables
+  debug_fprintf(stderr, "Figure out which loop variables will be our thread and block dimension variables\n"); 
+
+  //Get our indexes  (threadIdx and blockIdx will replace some loops) 
+  std::vector<const char*> indexes;
+
+  if (cu_bx > 1 || cu_bx_repr) {
+    indexes.push_back("bx");
+    chillAST_VarDecl *biddecl = addBuiltin( "blockIdx.x", "int", GPUKernel );
+    chillAST_DeclRefExpr *bid = new chillAST_DeclRefExpr( biddecl ); 
+    chillAST_VarDecl *bxdecl = new chillAST_VarDecl( "int", "bx", "", GPUKernel );
+    GPUKernel->addDecl( bxdecl );
+    chillAST_DeclRefExpr *bx = new chillAST_DeclRefExpr( bxdecl ); 
+    chillAST_BinaryOperator *assign = new chillAST_BinaryOperator( bx, "=", bid ); 
+    assign->print(0,stderr); debug_fprintf(stderr, "\n"); 
+
+    kernelbody->addChild(bxdecl); 
+    kernelbody->addChild(assign); 
+  }
+
+  if (cu_by > 1 || cu_by_repr) {
+    indexes.push_back("by");
+    chillAST_VarDecl *biddecl = addBuiltin( "blockIdx.y", "int", GPUKernel );
+    chillAST_DeclRefExpr *bid = new chillAST_DeclRefExpr( biddecl ); 
+    chillAST_VarDecl *bydecl = new chillAST_VarDecl( "int", "by", "", GPUKernel );
+    GPUKernel->addDecl( bydecl );
+    chillAST_DeclRefExpr *by = new chillAST_DeclRefExpr( bydecl ); 
+    chillAST_BinaryOperator *assign = new chillAST_BinaryOperator( by, "=", bid ); 
+    assign->print(0,stderr); debug_fprintf(stderr, "\n"); 
+
+    kernelbody->addChild(bydecl); 
+    kernelbody->addChild(assign); 
+  }  
+  if (cu_tx_repr || cu_tx > 1) {
+    //threadsPos = indexes.size();
+    indexes.push_back("tx");
+    chillAST_VarDecl *tiddecl = addBuiltin( "threadIdx.x", "int",     GPUKernel);
+    chillAST_DeclRefExpr *tid = new chillAST_DeclRefExpr( tiddecl ); 
+    chillAST_VarDecl *txdecl = new chillAST_VarDecl( "int", "tx", "", GPUKernel);
+    GPUKernel->addDecl( txdecl );
+    chillAST_DeclRefExpr *tx = new chillAST_DeclRefExpr( txdecl ); 
+    chillAST_BinaryOperator *assign = new chillAST_BinaryOperator( tx, "=", tid ); 
+    assign->print(0, stderr); debug_fprintf(stderr, "\n"); 
+
+    kernelbody->addChild(txdecl); 
+    kernelbody->addChild(assign); 
+  }
+  if (cu_ty_repr || cu_ty > 1) {
+    indexes.push_back("ty");
+    chillAST_VarDecl *biddecl = addBuiltin( "threadIdx.y", "int", GPUKernel );
+    chillAST_DeclRefExpr *tid = new chillAST_DeclRefExpr( biddecl ); 
+    chillAST_VarDecl *tydecl = new chillAST_VarDecl( "int", "ty", "", GPUKernel );
+    GPUKernel->addDecl( tydecl );
+    chillAST_DeclRefExpr *ty = new chillAST_DeclRefExpr( tydecl ); 
+    chillAST_BinaryOperator *assign = new chillAST_BinaryOperator( ty, "=", tid ); 
+    assign->print(0,stderr); debug_fprintf(stderr, "\n"); 
+
+    kernelbody->addChild(tydecl); 
+    kernelbody->addChild(assign); 
+  }
+  if (cu_tz_repr || cu_tz > 1) {
+    indexes.push_back("tz");
+    chillAST_VarDecl *biddecl = addBuiltin( "threadIdx.z", "int", GPUKernel );
+    chillAST_DeclRefExpr *tid = new chillAST_DeclRefExpr( biddecl ); 
+    chillAST_VarDecl *tzdecl = new chillAST_VarDecl( "int", "tz", "", GPUKernel );
+    GPUKernel->addDecl( tzdecl );
+    chillAST_DeclRefExpr *tz = new chillAST_DeclRefExpr( tzdecl ); 
+    chillAST_BinaryOperator *assign = new chillAST_BinaryOperator( tz, "=", tid ); 
+    assign->print(0,stderr); debug_fprintf(stderr, "\n"); 
+
+    kernelbody->addChild(tzdecl); 
+    kernelbody->addChild(assign); 
+  }
+
+
+  debug_fprintf(stderr, "\n"); 
+  for (int i = 0; i < indexes.size(); i++) {
+    debug_fprintf(stderr, "indexes[%i] = '%s'\n", i, indexes[i] ); 
+  }
+
+  debug_fprintf(stderr, "\nbefore swapVarReferences(), code is\n{\n"); 
+  kernelbody->print();
+
+  debug_fprintf(stderr, "}\n\nswapVarReferences()\n"); 
+  //swapVarReferences( kernelloop, GPUKernel );
+
+  debug_fprintf(stderr, "\nafter swapVarReferences(), code is\n"); 
+  kernelbody->print();
+  debug_fprintf(stderr, "\n\n");
+  
+  
+  debug_fprintf(stderr, "now replace indexes ... (and add syncs)\n"); 
+  findReplacePreferedIdxs( kernelloop, GPUKernel );
+  debug_fprintf(stderr, "DONE WITH replace indexes ... (and add syncs)\n"); 
+
+  debug_fprintf(stderr, "\nswapped 2\nshould have syncs\nshould have indexes replaced by bx, tx, etc \n\n"); 
+  kernelloop->print();
+
+  // now remove loops that will be done by spreaking the loop count across cores
+  // these are loops that have out indeces gathered above aas loop variables
+  debug_fprintf(stderr, "removing loops for variables that will be determined by core index\n"); 
+  chillAST_CompoundStmt *CS = new chillAST_CompoundStmt();
+  
+  CS->addChild( kernelloop ); // in case top level loop will go away
+  //debug_fprintf(stderr, "arbitrary compoundstmt 0x%x to hold child kernelloop  0x%x\n", CS, kernelloop); 
+  for (int i = 0; i < indexes.size(); i++) {
+    debug_fprintf(stderr, "\nindexes[%i] = '%s'\n", i, indexes[i] ); 
+    debug_fprintf(stderr, "forReduce()\n");
+    
+    kernelloop->loseLoopWithLoopVar( strdup(indexes[i]) ); 
+  }
+
+
+  
+
+
+  debug_fprintf(stderr, "END cudaize codegen V2 (ROSE)\n\n\n");
+  debug_fprintf(stderr, "\nat end of cudaize_codegen_v2(), returning\n");
+  CS->print(); 
+
+
+  // variables in CS have not been added to GPUKernel.   fix that
+  // should probably do this earlier/elsewhere
+  vector<chillAST_VarDecl*> kerneldecls;
+  vector<chillAST_VarDecl*> kerneldeclsused;
+  GPUKernel->gatherVarDecls( kerneldecls );
+  CS->gatherVarUsage( kerneldeclsused );
+
+
+
+
+  debug_fprintf(stderr, "kernel defines %d variables\n", kerneldecls.size()); 
+  for (int i=0; i<kerneldecls.size(); i++) { 
+    chillAST_VarDecl *vd = kerneldecls[i]; 
+    if (vd->isParmVarDecl()) { 
+      vd->print(); 
+      printf("  (parameter)");
+      printf("\n"); fflush(stdout); 
+    }
+  }
+  for (int i=0; i<kerneldecls.size(); i++) { 
+    chillAST_VarDecl *vd = kerneldecls[i]; 
+    if (vd->isBuiltin()) { 
+      vd->print(); 
+      printf("  (builtin)");
+      printf("\n"); fflush(stdout); 
+    }
+  }
+  for (int i=0; i<kerneldecls.size(); i++) { 
+    chillAST_VarDecl *vd = kerneldecls[i]; 
+    if ( (!vd->isParmVarDecl()) && (!vd->isBuiltin()) ) { 
+      vd->print(); 
+      printf("\n"); fflush(stdout); 
+    }
+  }
+         printf("\n"); fflush(stdout); 
+
+
+         debug_fprintf(stderr, "kernel uses    %d variables\n", kerneldeclsused.size()); 
+       for (int i=0; i<kerneldeclsused.size(); i++) { 
+         chillAST_VarDecl *vd = kerneldeclsused[i];
+         debug_fprintf(stderr, "%2d %s\n", i, vd->varname); 
+       }
+         debug_fprintf(stderr, "\n\n");  
+
+
+
+  int numdeclared = kerneldecls.size(); 
+  for (int i=0; i<kerneldeclsused.size(); i++) { 
+    chillAST_VarDecl *vd = kerneldeclsused[i];
+    bool isdeclared = false;
+    debug_fprintf(stderr, "%2d %s ", i, vd->varname); 
+    if (vd->isBuiltin())     isdeclared = true;
+    if (isdeclared) debug_fprintf(stderr, " (builtin)");
+    else { 
+      if (vd->isParmVarDecl()) isdeclared = true;
+      if (isdeclared) debug_fprintf(stderr, " (param)");
+    }
+    for (int j=0; j<numdeclared; j++) { 
+      if (kerneldeclsused[i] == kerneldecls[j] ) {
+        isdeclared = true; 
+        debug_fprintf(stderr, " (used %d is decl %d)", i, j); 
+        break;
+      }
+    }
+    debug_fprintf(stderr, "\n"); 
+
+    if (!isdeclared) { 
+      debug_fprintf(stderr, "declaration for %s needs to be added\n", vd->varname);
+      GPUKernel->addChild( vd ); 
+    }
+  }  
+
+
+
+  // take contents of CS and stuff it into GPUKernel, at the end after the declarations we might have just added 
+  GPUKernel->addChild( CS ) ; // ?? could do each statement
+
+  //debug_fprintf(stderr, "\nGPU side func is \n");
+  //GPUKernel->print();
+
+  return CS; 
 }
+
+
+
 
 //Order taking out dummy variables
 std::vector<std::string> cleanOrder(std::vector<std::string> idxNames) {
@@ -2956,9 +2226,14 @@ bool LoopCuda::permute(int stmt_num, const std::vector<int> &pi) {
   if (stmt_num >= stmt.size() || stmt_num < 0)
     throw std::invalid_argument("invalid statement " + to_string(stmt_num));
   const int n = stmt[stmt_num].xform.n_out();
-  if (pi.size() > (n - 1) / 2)
+
+  if (pi.size() > (n - 1) / 2) { 
+    debug_fprintf(stderr, "loop_cuda_rose.cc L 2213, pi.size() %d    n %d   (n+1)/2 %d\n", pi.size(), n, (n+1)/2);
+    for (int i=0; i<pi.size(); i++) debug_fprintf(stderr, "pi[%d] = %d\n", i, pi[i]);
+    
     throw std::invalid_argument(
       "iteration space dimensionality does not match permute dimensionality");
+  }
   int first_level = 0;
   int last_level = 0;
   for (int i = 0; i < pi.size(); i++) {
@@ -3030,9 +2305,10 @@ bool LoopCuda::datacopy_privatized_cuda(int stmt_num, int level,
                                         const std::vector<int> &privatized_levels, bool allow_extra_read,
                                         int fastest_changing_dimension, int padding_stride,
                                         int padding_alignment, bool cuda_shared) {
+  debug_fprintf(stderr, "LoopCuda::datacopy_privatized_cuda()\n"); 
   int old_stmts = stmt.size();
-  //  printf("before datacopy_privatized:\n");
-  printIS();
+  printf("before datacopy_privatized:\n");
+  printIS(); fflush(stdout); 
   //datacopy_privatized(stmt_num, level, array_name, privatized_levels, allow_extra_read, fastest_changing_dimension, padding_stride, padding_alignment, cuda_shared);
   if (cuda_shared)
     datacopy_privatized(stmt_num, level, array_name, privatized_levels,
@@ -3042,8 +2318,8 @@ bool LoopCuda::datacopy_privatized_cuda(int stmt_num, int level,
     datacopy_privatized(stmt_num, level, array_name, privatized_levels,
                         allow_extra_read, fastest_changing_dimension, padding_stride,
                         padding_alignment, 0);
-  //  printf("after datacopy_privatized:\n");
-  printIS();
+  printf("after datacopy_privatized:\n");
+  printIS(); fflush(stdout); 
   
   //Adjust idxNames to reflect updated state
   std::vector<std::string> cIdxNames = cleanOrder(idxNames[stmt_num]);
@@ -3087,8 +2363,8 @@ bool LoopCuda::datacopy_cuda(int stmt_num, int level,
   
   int old_stmts = stmt.size();
   //datacopy(stmt_num,level,array_name,allow_extra_read,fastest_changing_dimension,padding_stride,padding_alignment,cuda_shared);
-  //  printf("before datacopy:\n");
-  //  printIS();
+  printf("before datacopy:\n"); fflush(stdout); 
+  printIS(); fflush(stdout);  
   if (cuda_shared)
     datacopy(stmt_num, level, array_name, allow_extra_read,
              fastest_changing_dimension, padding_stride, padding_alignment,
@@ -3097,9 +2373,9 @@ bool LoopCuda::datacopy_cuda(int stmt_num, int level,
     datacopy(stmt_num, level, array_name, allow_extra_read,
              fastest_changing_dimension, padding_stride, padding_alignment,
              0);
-  //  printf("after datacopy:\n");
-  printIS();
-
+  printf("after datacopy:\n"); fflush(stdout); 
+  printIS(); fflush(stdout); 
+  
   //Adjust idxNames to reflect updated state
   std::vector<std::string> cIdxNames = cleanOrder(idxNames[stmt_num]);
   int new_stmts = stmt.size();
@@ -3131,6 +2407,9 @@ bool LoopCuda::datacopy_cuda(int stmt_num, int level,
 }
 
 bool LoopCuda::unroll_cuda(int stmt_num, int level, int unroll_amount) {
+  fflush(stdout); 
+  debug_fprintf(stderr, "\nLoopCuda::unroll_cuda( stmt_num %d,  level %d,  unroll_amount %d )\n",stmt_num, level, unroll_amount); 
+
   int old_stmts = stmt.size();
   //bool b= unroll(stmt_num, , unroll_amount);
   
@@ -3269,9 +2548,15 @@ void LoopCuda::copy_to_constant(const char *array_name) {
 }
 
 //protonu--moving this from Loop
-SgNode* LoopCuda::codegen() {
-  if (code_gen_flags & GenCudaizeV2)
-    return cudaize_codegen_v2();
+chillAST_node* LoopCuda::codegen() {
+  debug_fprintf(stderr, "LoopCuda::codegen()  (ROSE)\n"); 
+  if (code_gen_flags & GenCudaizeV2) { 
+    debug_fprintf(stderr, "LoopCuda::codegen() calling cudaize_codegen_v2()\n"); 
+    chillAST_node* n = cudaize_codegen_v2(); // this is chill
+    //debug_fprintf(stderr, "back from cudaize_codegen_v2()\n"); 
+    //n->print(); 
+    return n;
+  }
   //Do other flagged codegen methods, return plain vanilla generated code
   return getCode();
 }
@@ -3285,10 +2570,13 @@ namespace omega {
   extern int lowerBoundForLevel;
 }
 
+
+
 CG_outputRepr* LoopCuda::extractCudaUB(int stmt_num, int level,
                                        int &outUpperBound, int &outLowerBound) {
   // check for sanity of parameters
   const int m = stmt.size();
+
   if (stmt_num >= m || stmt_num < 0)
     throw std::invalid_argument("invalid statement " + to_string(stmt_num));
   const int n = stmt[stmt_num].xform.n_out();
@@ -3314,8 +2602,7 @@ CG_outputRepr* LoopCuda::extractCudaUB(int stmt_num, int level,
     }
     
     for (int i = 2; i <= dim + 1; i += 2) {
-      //std::string name = std::string("_t") + to_string(t_counter++);
-      std::string name = std::string("_t")
+      std::string name = std::string("chill_t")
         + to_string(tmp_loop_var_name_counter++);
       hull.name_set_var(i, name);
     }
@@ -3335,24 +2622,8 @@ CG_outputRepr* LoopCuda::extractCudaUB(int stmt_num, int level,
   
   // extract the loop stride
   EQ_Handle stride_eq;
-  /*int stride = 1;
-    {
-    bool simple_stride = true;
-    int strides = countStrides(bound.query_DNF()->single_conjunct(),
-    bound.set_var(dim + 1), stride_eq, simple_stride);
-    if (strides > 1)
-    throw loop_error("loop error: too many strides");
-    else if (strides == 1) {
-    int sign = stride_eq.get_coef(bound.set_var(dim + 1));
-    //      assert(sign == 1 || sign == -1);
-    Constr_Vars_Iter it(stride_eq, true);
-    stride = abs((*it).coef / sign);
-    }
-    }
-  */
   int stride = 1;
   {
-    
     coef_t stride;
     std::pair<EQ_Handle, Variable_ID> result = find_simplest_stride(bound,
                                                                     bound.set_var(dim + 1));
@@ -3385,7 +2656,8 @@ CG_outputRepr* LoopCuda::extractCudaUB(int stmt_num, int level,
   stmtForLoopCheck = stmt_num;
   upperBoundForLevel = -1;
   lowerBoundForLevel = -1;
-  printCode(1, false);
+  debug_fprintf(stderr, "loop_cuda_ROSE.cc printCode(3, false)\n"); 
+  printCode(3, false); 
   checkLoopLevel = 0;
   
   outUpperBound = upperBoundForLevel;
@@ -3405,14 +2677,15 @@ CG_outputRepr* LoopCuda::extractCudaUB(int stmt_num, int level,
                  const_cast<Relation &>(bound).single_conjunct()->GEQs());
                e; e++) {
             if ((*e).get_coef(v) < 0
-                && (*e).is_const_except_for_global(v))
+                && (*e).is_const_except_for_global(v)
+                )
               return output_upper_bound_repr(ir->builder(), *e, v,
                                              bound,
                                              std::vector<std::pair<CG_outputRepr *, int> >(
-                                               bound.n_set(),
-                                               std::make_pair(
-                                                 static_cast<CG_outputRepr *>(NULL),
-                                                 0)));
+                                                                                           bound.n_set(),
+                                                                                           std::make_pair(
+                                                                                                          static_cast<CG_outputRepr *>(NULL),
+                                                                                                          0)));
           }
         }
         if (loop->level_ > 2 * level)
@@ -3427,19 +2700,15 @@ CG_outputRepr* LoopCuda::extractCudaUB(int stmt_num, int level,
   return NULL;
 }
 
+
+
 void LoopCuda::printCode(int effort, bool actuallyPrint) const {
+  debug_fprintf(stderr, "LoopCuda::printCode( effort %d ) ROSE\n", effort); 
+
   const int m = stmt.size();
   if (m == 0)
     return;
   const int n = stmt[0].xform.n_out();
-  
-  /*or (int i = 0; i < m; i++) {
-    IS[i + 1] = stmt[i].IS;
-    xform[i + 1] = stmt[i].xform;
-    
-    //nonSplitLevels[i+1] = stmt[i].nonSplitLevels;
-    }
-  */
   
   // invalidate saved codegen computation
   if (last_compute_cgr_ != NULL) {
@@ -3488,7 +2757,7 @@ void LoopCuda::printCode(int effort, bool actuallyPrint) const {
   
   last_compute_cg_ = new CodeGen(xforms, IS, known, nonSplitLevels, idxNames,
                                  syncs);
-
+  
   delete last_compute_cgr_;  // this was just done  above? 
   last_compute_cgr_ = NULL;
   //}
@@ -3508,6 +2777,7 @@ void LoopCuda::printCode(int effort, bool actuallyPrint) const {
   
   if (actuallyPrint)
     std::cout << repr << std::endl;
+  cout.flush(); 
   //std::cout << static_cast<CG_stringRepr*>(repr)->GetString();
   /*
     for (int i = 1; i <= m; i++)
@@ -3516,6 +2786,8 @@ void LoopCuda::printCode(int effort, bool actuallyPrint) const {
   
   //delete ocg;
 }
+
+
 
 void LoopCuda::printRuntimeInfo() const {
   for (int i = 0; i < stmt.size(); i++) {
@@ -3531,6 +2803,8 @@ void LoopCuda::printRuntimeInfo() const {
   }
 }
 
+
+
 void LoopCuda::printIndexes() const {
   for (int i = 0; i < stmt.size(); i++) {
     printf("stmt %d nset %d ", i, stmt[i].IS.n_set());
@@ -3544,30 +2818,22 @@ void LoopCuda::printIndexes() const {
   }
 }
 
-SgNode* LoopCuda::getCode(int effort) const {
+
+
+chillAST_node* LoopCuda::getCode(int effort) const {
+  debug_fprintf(stderr, "loop_cuda_rose.cc LoopCuda::getCode( effort %d )\n", effort);  
   const int m = stmt.size();
+  debug_fprintf(stderr, "%d statements\n", m);
   if (m == 0)
-    return new SgNode;
+    return NULL;
+
   const int n = stmt[0].xform.n_out();
-  /*
-    Tuple<CG_outputRepr *> ni(m);
-    Tuple < Relation > IS(m);
-    Tuple < Relation > xform(m);
-    vector < vector <int> > nonSplitLevels(m);
-    for (int i = 0; i < m; i++) {
-    ni[i + 1] = stmt[i].code;
-    IS[i + 1] = stmt[i].IS;
-    xform[i + 1] = stmt[i].xform;
-    nonSplitLevels[i + 1] = stmt_nonSplitLevels[i];
-    
-    //nonSplitLevels[i+1] = stmt[i].nonSplitLevels;
-    }
-  */
-  //Relation known = Extend_Set(copy(this->known), n - this->known.n_set());
-//#ifdef DEBUG
-//#endif
-  //std::cout << GetString(MMGenerateCode(new CG_stringBuilder(), xform, IS, ni, known,
-  //                nonSplitLevels, syncs, idxTupleNames, effort));
+  debug_fprintf(stderr, "n %d\n", n); 
+
+  //debug_fprintf(stderr, "stmt[0] "); 
+  //stmt[0].code->dump(); 
+  //debug_fprintf(stderr, "\n\n"); 
+  
   if (last_compute_cgr_ != NULL) {
     delete last_compute_cgr_;
     last_compute_cgr_ = NULL;
@@ -3579,6 +2845,7 @@ SgNode* LoopCuda::getCode(int effort) const {
   }
   
   CG_outputBuilder *ocg = ir->builder();
+  debug_fprintf(stderr, "replacing MMGenerateCode\n"); 
   // -- replacing MMGenerateCode
   // -- formally CG_outputRepr* repr = MMGenerateCode(ocg, xform, IS, nameInfo, known, nonSplitLevels, syncs, idxTupleNames, effort);
   // -- in the future, these if statements need to be cleaned up.
@@ -3594,18 +2861,8 @@ SgNode* LoopCuda::getCode(int effort) const {
     nonSplitLevels[i] = stmt_nonSplitLevels[i];
   }
   
-  /*std::vector < std::vector<std::string> > idxTupleNames;
-    if (useIdxNames) {
-    for (int i = 0; i < idxNames.size(); i++) {
-    std::vector<std::string> idxs;
-    for (int j = 0; j < idxNames[i].size(); j++)
-    idxs.push_back(idxNames[i][j]);
-    idxTupleNames.push_back(idxs);
-    }
-    }
-  */
+  debug_fprintf(stderr, "known\n"); 
   Relation known = Extend_Set(copy(this->known), n - this->known.n_set());
-  
   last_compute_cg_ = new CodeGen(xforms, IS, known, nonSplitLevels, idxNames,
                                  syncs);
   delete last_compute_cgr_;
@@ -3617,13 +2874,18 @@ SgNode* LoopCuda::getCode(int effort) const {
     last_compute_cgr_ = last_compute_cg_->buildAST(effort);
     last_compute_effort_ = effort;
   }
-  
+  debug_fprintf(stderr, "AST built?\n"); 
+
   std::vector<CG_outputRepr *> stmts(m);
   for (int i = 0; i < m; i++)
     stmts[i] = stmt[i].code;
+
+  debug_fprintf(stderr, "before printRepr()\n"); 
   CG_outputRepr* repr = last_compute_cgr_->printRepr(ocg, stmts);
   // -- end replacing MMGenerateCode
-  
+  debug_fprintf(stderr, "end replacing MMGenerateCode\n"); 
+
+
   //CG_outputRepr *overflow_initialization = ocg->CreateStmtList();
   CG_outputRepr *overflow_initialization = ocg->StmtListAppend(NULL, NULL);
   for (std::map<int, std::vector<Free_Var_Decl *> >::const_iterator i =
@@ -3639,38 +2901,44 @@ SgNode* LoopCuda::getCode(int effort) const {
                                 ocg->CreateInt(0)), NULL));
   
   repr = ocg->StmtListAppend(overflow_initialization, repr);
-  SgNode *tnl = static_cast<CG_roseRepr *>(repr)->GetCode();
-  SgStatementPtrList *list = static_cast<CG_roseRepr *>(repr)->GetList();
-  
-  if (tnl != NULL)
-    return tnl;
-  else if (tnl == NULL && list != NULL) {
-    SgBasicBlock* bb2 = buildBasicBlock();
-    
-    for (SgStatementPtrList::iterator it = (*list).begin();
-         it != (*list).end(); it++)
-      bb2->append_statement(*it);
-    
-    tnl = isSgNode(bb2);
-  } else
-    throw loop_error("codegen failed");
-  
-  delete repr;
-  /*
-    for (int i = 1; i <= m; i++)
-    delete ni[i];
-  */
-  return tnl;
-  
+
+
+
+  // return the code block we just created
+  //((CG_chillRepr *)repr)->printChillNodes();
+  vector<chillAST_node*> cnodes = ((CG_chillRepr *)repr)->chillnodes;  // is this doing somethine incredibly expensive?
+  int numnodes = cnodes.size();
+  debug_fprintf(stderr, "%d chillAST nodes in the vector\n", numnodes);
+ 
+  if (numnodes == 0) return NULL; // ??
+  if (numnodes == 1) { 
+    // this seems to be the exit path that is actually used
+    //debug_fprintf(stderr, "the one node is of type %s\nexiting LoopCuda::getCode()\n", cnodes[0]->getTypeString()); 
+
+    return cnodes[0];
+  }
+
+  debug_fprintf(stderr, "more than one chillAST_node.  I'll put them all in a compound statement  UNTESTED\n" ); 
+  chillAST_CompoundStmt *CS = new chillAST_CompoundStmt( );
+  for (int i=0; i<numnodes; i++) { 
+    CS->addChild( cnodes[i] );
+    cnodes[i]->setParent( CS );  // perhaps not needed
+  }
+  return CS;
 }
+
+
 
 //protonu--adding constructors for the new derived class
 LoopCuda::LoopCuda() :
   Loop(), code_gen_flags(GenInit) {
+  debug_fprintf(stderr, "making LoopCuda ROSE variety\n"); 
+
 }
 
 LoopCuda::LoopCuda(IR_Control *irc, int loop_num) :
   Loop(irc) {
+  debug_fprintf(stderr, "making LoopCuda ROSE variety\n"); 
   setup_code = NULL;
   teardown_code = NULL;
   code_gen_flags = 0;
@@ -3687,48 +2955,50 @@ LoopCuda::LoopCuda(IR_Control *irc, int loop_num) :
   constant_mem = NULL;
   
   int m = stmt.size();
-  //printf("\n the size of stmt(initially) is: %d\n", stmt.size());
+  debug_fprintf(stderr, "\n the size of stmt(initially) is: %d\n", stmt.size());
   for (int i = 0; i < m; i++)
     stmt_nonSplitLevels.push_back(std::vector<int>());
   
-  globals = ((IR_cudaroseCode *) ir)->gsym_;
-  globalScope = ((IR_cudaroseCode *) ir)->first_scope;
-  parameter_symtab = ((IR_cudaroseCode *) ir)->parameter;
-  body_symtab = ((IR_cudaroseCode *) ir)->body;
-  func_body = ((IR_cudaroseCode *) ir)->defn;
-  func_definition = ((IR_cudaroseCode *) ir)->func_defn;
-  std::vector<SgForStatement *> tf = ((IR_cudaroseCode *) ir)->get_loops();
+  chillAST_FunctionDecl *FD = ((IR_cudaroseCode *) ir)->func_defn;
+  function_that_contains_this_loop = FD;  // keep around for later 
   
-  symtab = tf[loop_num]->get_symbol_table();
+  chillAST_node *  func_body = FD->getBody(); 
+  //debug_fprintf(stderr, "got body\n"); 
   
-  std::vector<SgForStatement *> deepest = find_deepest_loops(
-    isSgNode(tf[loop_num]));
+  std::vector<chillAST_ForStmt *> loops;
+  func_body->get_top_level_loops( loops); 
+  debug_fprintf(stderr, "%d loops    loop_num %d\n", loops.size(), loop_num); 
   
-  for (int i = 0; i < deepest.size(); i++) {
-    SgVariableSymbol* vs;
-    SgForInitStatement* list = deepest[i]->get_for_init_stmt();
-    SgStatementPtrList& initStatements = list->get_init_stmt();
-    SgStatementPtrList::const_iterator j = initStatements.begin();
-    if (SgExprStatement *expr = isSgExprStatement(*j))
-      if (SgAssignOp* op = isSgAssignOp(expr->get_expression()))
-        if (SgVarRefExp* var_ref = isSgVarRefExp(op->get_lhs_operand()))
-          vs = var_ref->get_symbol();
-    
-    index.push_back(vs->get_name().getString().c_str()); //reflects original code index names
+  std::vector<chillAST_ForStmt *> deeploops;
+  loops[loop_num]->get_deep_loops( deeploops); 
+  debug_fprintf(stderr, "%d deepest\n", deeploops.size()); 
+  
+  std::vector<std::string> loopvars;
+  for (int i=0; i<deeploops.size(); i++) { 
+    deeploops[i]->gatherLoopVars( loopvars );
+  }
+  //debug_fprintf(stderr, "%d loop variables\n", loopvars.size());
+  for (int i=0; i<loopvars.size(); i++) { 
+    debug_fprintf(stderr, "index[%d] = '%s'\n", i, loopvars[i].c_str());
   }
   
-  for (int i = 0; i < stmt.size(); i++)
-    idxNames.push_back(index); //refects prefered index names (used as handles in cudaize v2)
+  debug_fprintf(stderr, "adding IDXNAMES\n"); 
+  for (int i = 0; i < stmt.size(); i++){
+    idxNames.push_back(loopvars); //refects prefered index names (used as handles in cudaize v2)
+    //pushes the entire array of loop vars for each stmt? 
+  }
   useIdxNames = false;
-  
 }
 
 void LoopCuda::printIS() {
- if (!cudaDebug) return;
+  if (!cudaDebug) return;
   int k = stmt.size();
   for (int i = 0; i < k; i++) {
     printf(" printing statement:%d\n", i);
     stmt[i].IS.print();
   }
+  fflush(stdout); 
 }
+
+#endif
 

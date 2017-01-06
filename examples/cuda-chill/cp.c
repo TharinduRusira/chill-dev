@@ -4,12 +4,13 @@
 #define VOLSIZEX 512
 #define VOLSIZEZ 1
 #define ATOMCOUNT 4000
+#define ATOMCOUNTTIMES4 16000
 #define GRIDSPACING 0.1
 #define zDim 0
 
 extern float sqrtf(float);
 
-void cenergy_cpu(float atoms[ATOMCOUNT*4],float *energy,float z)
+void cenergy_cpu(float atoms[ATOMCOUNTTIMES4],float *energy,float z)
 {
 int i,j,n;float dx,dy,dz; 
    
